@@ -1,0 +1,25 @@
+{
+    "id": "com_grantabell_SpotifyEssentials",
+    "name": "Deck Essentials for Spotify",
+    "version": "1.0.0",
+    "author": "grant",
+    "github": "https://github.com/GrantAbell/StreamController-Spotify",
+    "thumbnail": "store/thumbnail.png",
+    "descriptions": {
+        "en_US": "Full Spotify playback control for Stream Deck and Stream Deck+: transport, seek, shuffle and repeat, volume and mute, Liked Songs, playlists, a one-key now-playing Song Stack, and four native Stream Deck+ dial actions. Uses your own Spotify Client ID with PKCE; no client secret."
+    },
+    "short-descriptions": {
+        "en_US": "Control Spotify from keys and Stream Deck+ dials."
+    },
+    "tags": [
+        "spotify",
+        "music",
+        "media",
+        "dial",
+        "streamdeck+"
+    ],
+    "minimum-app-version": "1.5.0-beta.8",
+    "app-version": "1.5.0-beta.15",
+    "description": "Full Spotify playback control for Stream Deck and Stream Deck+: transport, seek, shuffle and repeat, volume and mute, Liked Songs, playlists, a one-key now-playing Song Stack, and four native Stream Deck+ dial actions. Uses your own Spotify Client ID with PKCE; no client secret.",
+    "short-description": "Control Spotify from keys and Stream Deck+ dials."
+}

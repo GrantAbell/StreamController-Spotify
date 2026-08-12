@@ -1,0 +1,6 @@
+# Both of these are already provided by the StreamController runtime
+# (verified: requests 2.32.3, Pillow 11.1.0 in the 1.5.0-beta.15 Flatpak).
+# They are listed because the plugin genuinely imports them, and a runtime that
+# ever drops them would otherwise fail at import time with no explanation.
+requests>=2.28
+Pillow>=9.0

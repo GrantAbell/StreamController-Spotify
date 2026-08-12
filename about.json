@@ -1,0 +1,14 @@
+{
+    "name": "Deck Essentials for Spotify",
+    "version": "1.0.0",
+    "author": "grant",
+    "license": "GPL-3.0-or-later",
+    "repository": "https://github.com/GrantAbell/StreamController-Spotify",
+    "summary": "Control Spotify from StreamController, including Stream Deck+ dials.",
+    "description": "Playback, seek, shuffle, repeat, volume, mute, Like/Unlike, Add to Playlist, device transfer and a one-key now-playing Song Stack, plus four Stream Deck+ dial actions: Playback Control, Volume Control, My Playlists and My Liked Songs. Authentication uses OAuth PKCE with a Client ID you create yourself; no client secret is ever requested and tokens are kept outside exportable page settings.",
+    "requirements": [
+        "A Spotify Premium account (Spotify's playback-control endpoints are Premium-only)",
+        "Your own Spotify Developer app Client ID with http://127.0.0.1/callback registered as a redirect URI",
+        "Network access from StreamController to api.spotify.com"
+    ]
+}

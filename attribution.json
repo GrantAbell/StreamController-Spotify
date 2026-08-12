@@ -1,0 +1,37 @@
+{
+    "generic": {
+        "name": "Deck Essentials for Spotify",
+        "author": "grant",
+        "license": "GPL-3.0-or-later",
+        "license-url": "https://www.gnu.org/licenses/gpl-3.0.html",
+        "comment": "Plugin code, the icon set and all rendered key and dial images are original work. This plugin is not affiliated with, endorsed by, or sponsored by Spotify."
+    },
+    "spotify": {
+        "name": "Spotify Web API, metadata and artwork",
+        "author": "Spotify AB",
+        "license": "Spotify Developer Terms of Service",
+        "license-url": "https://developer.spotify.com/terms",
+        "comment": "Track, album, playlist and artwork content shown on the deck is supplied by the Spotify Web API and remains the property of Spotify and its licensors. Artwork is displayed uncropped and unmodified, and every action preserves the Spotify URI so the item can be opened in Spotify. Spotify is a trademark of Spotify AB."
+    },
+    "fonts": {
+        "name": "DejaVu Sans",
+        "author": "DejaVu fonts project",
+        "license": "DejaVu Fonts License (Bitstream Vera derived)",
+        "license-url": "https://dejavu-fonts.github.io/License.html",
+        "comment": "Loaded from the host or runtime font path for key and dial rendering; not bundled with this plugin."
+    },
+    "requests": {
+        "name": "Requests",
+        "author": "Kenneth Reitz and contributors",
+        "license": "Apache-2.0",
+        "license-url": "https://www.apache.org/licenses/LICENSE-2.0",
+        "comment": "Used for all Spotify HTTPS traffic. Provided by the StreamController runtime."
+    },
+    "pillow": {
+        "name": "Pillow",
+        "author": "Jeffrey A. Clark and contributors",
+        "license": "MIT-CMU",
+        "license-url": "https://github.com/python-pillow/Pillow/blob/main/LICENSE",
+        "comment": "Used to draw every key and dial image. Provided by the StreamController runtime."
+    }
+}
