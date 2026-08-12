@@ -98,6 +98,7 @@ DEFAULT_PLUGIN_SETTINGS = {
     "device_refresh_interval_ms": 15000,
     "default_volume_step": 5,
     "default_seek_seconds": 5,
+    "open_links_in_app": True,
     "marquee_enabled": True,
     "marquee_speed_px_per_second": 32,
     "debug_logging": False,

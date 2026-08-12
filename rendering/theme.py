@@ -29,6 +29,9 @@ TRACK = (58, 58, 58)
 GREEN_DIM = (23, 140, 65)
 WARNING = (255, 176, 46)
 ERROR = (226, 87, 76)
+#: Backing colour for a failure card; ERROR itself is a text colour and glares
+#: as a full-slice background.
+ERROR_DIM = (128, 40, 34)
 INFO = (120, 170, 255)
 
 #: Explicit-content marker; deliberately neutral, never green.

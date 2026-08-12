@@ -79,6 +79,18 @@ class Endpoints:
     def show(show_id: str) -> str:
         return f"/shows/{show_id}"
 
+    @staticmethod
+    def track(track_id: str) -> str:
+        return f"/tracks/{track_id}"
+
+    @staticmethod
+    def episode(episode_id: str) -> str:
+        return f"/episodes/{episode_id}"
+
+    @staticmethod
+    def user(user_id: str) -> str:
+        return f"/users/{user_id}"
+
 
 @runtime_checkable
 class SpotifyApiProtocol(Protocol):
@@ -332,7 +344,12 @@ class SpotifyApiClient:
     # -- context ----------------------------------------------------------
 
     def get_context(self, uri: str) -> dict | None:
-        """Resolve a playback context URI to its metadata, once per URI."""
+        """Resolve a URI to its metadata, once per URI.
+
+        Tracks and episodes are here too, not because they can be a playback
+        context, but because an action can be pointed at one and still wants
+        its name and cover.
+        """
         from .uri import parse_resource
 
         resource = parse_resource(uri)
@@ -344,6 +361,9 @@ class SpotifyApiClient:
             "album": Endpoints.album,
             "artist": Endpoints.artist,
             "show": Endpoints.show,
+            "track": Endpoints.track,
+            "episode": Endpoints.episode,
+            "user": Endpoints.user,
         }.get(resource.resource_type)
 
         if path_for_type is None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from spotify_essentials.spotify.models import (
     ITEM_TYPE_EPISODE,
     ITEM_TYPE_TRACK,
+    context_image_url,
     parse_devices,
     parse_playback,
     parse_playlists,
@@ -131,6 +132,16 @@ def test_pick_image_url_prefers_the_closest_size():
     assert pick_image_url(images, target_px=64) == "small"
     assert pick_image_url([]) is None
     assert pick_image_url([{"nope": 1}]) is None
+
+
+def test_context_cover_comes_from_the_album_for_a_track():
+    playlist = {"images": [{"url": "playlist.jpg", "width": 300}]}
+    track = {"album": {"images": [{"url": "album.jpg", "width": 300}]}}
+
+    assert context_image_url(playlist) == "playlist.jpg"
+    assert context_image_url(track) == "album.jpg"
+    assert context_image_url({}) is None
+    assert context_image_url(None) is None
 
 
 def test_device_parsing_defaults_supports_volume_to_true():

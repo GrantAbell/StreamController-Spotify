@@ -139,3 +139,61 @@ def uri_type(uri: str) -> str | None:
 def external_url_for_uri(uri: str) -> str | None:
     resource = parse_resource(uri) if uri else None
     return resource.external_url if resource else None
+
+
+def open_targets(url_or_uri: str | None, *, prefer_app: bool = True) -> list[str]:
+    """What to hand the desktop, in order, to open something in Spotify.
+
+    Which form is handed over is what decides where the link lands: the desktop
+    app registers the `spotify:` URI scheme, while `https://open.spotify.com/…`
+    belongs to whatever owns http links — the browser. The web player is kept
+    as the second try, since it works even with no app installed.
+    """
+    if not url_or_uri:
+        return []
+
+    resource = parse_resource(url_or_uri)
+    if resource is not None:
+        app_uri, web_url = resource.uri, resource.external_url
+    else:
+        app_uri, web_url = _loose_forms(url_or_uri)
+
+    targets = [web_url] if web_url else []
+    if app_uri and prefer_app:
+        targets.insert(0, app_uri)
+
+    # Nothing recognisable: hand over what the caller gave us rather than
+    # deciding it cannot be opened.
+    return targets or [url_or_uri]
+
+
+def _loose_forms(value: str) -> tuple[str | None, str | None]:
+    """Both forms of a Spotify link whose ID the strict parser rejects.
+
+    Only user profiles hit this in practice: account IDs older than the base62
+    scheme do exist, and one should still open in the app rather than nowhere.
+    Nothing here is used to build a request — only to open a link — so the ID
+    is passed along as found instead of being validated.
+    """
+    text = value.strip()
+
+    if text.startswith("spotify:"):
+        parts = text.split(":")
+        if len(parts) != 3 or parts[1] not in KNOWN_TYPES or not parts[2]:
+            return (None, None)
+        return (text, f"https://open.spotify.com/{parts[1]}/{parts[2]}")
+
+    parsed = urlparse(text if "://" in text else "https://" + text)
+    if parsed.hostname not in _SPOTIFY_HOSTS:
+        return (None, None)
+
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    if segments and segments[0].startswith("intl-"):
+        segments = segments[1:]
+    if len(segments) < 2 or segments[0] not in KNOWN_TYPES:
+        return (None, None)
+
+    return (
+        f"spotify:{segments[0]}:{segments[1]}",
+        f"https://open.spotify.com/{segments[0]}/{segments[1]}",
+    )

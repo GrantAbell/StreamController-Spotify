@@ -169,6 +169,18 @@ def pick_image_url(images, target_px: int = 300) -> str | None:
     return best_url
 
 
+def context_image_url(payload: dict | None, target_px: int = 300) -> str | None:
+    """The cover for whatever `get_context` resolved.
+
+    Playlists, albums, artists and shows carry their own `images`; a track has
+    none of its own and is represented by its album's.
+    """
+    if not payload:
+        return None
+    images = payload.get("images") or (payload.get("album") or {}).get("images")
+    return pick_image_url(images, target_px=target_px)
+
+
 def parse_track(data: dict | None) -> SpotifyTrack | None:
     """Parse a playback item of any type into the common track shape."""
     if not isinstance(data, dict):

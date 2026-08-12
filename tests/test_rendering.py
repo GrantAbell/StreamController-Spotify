@@ -17,13 +17,19 @@ from spotify_essentials.rendering.dial import (
 )
 from spotify_essentials.rendering.icons import ICONS, icon_names, render_icon, svg_for
 from spotify_essentials.rendering.key import (
+    render_artwork_key,
     render_glyph_key,
     render_mode_stack_key,
     render_text_key,
     render_value_key,
 )
 from spotify_essentials.rendering.song import render_song_stack
-from spotify_essentials.rendering.status import STATUS_LABELS, render_status, render_success_overlay
+from spotify_essentials.rendering.status import (
+    STATUS_LABELS,
+    render_dial_flash,
+    render_status,
+    render_success_overlay,
+)
 from spotify_essentials.spotify.state import ActionStatus
 
 KEY = (144, 144)
@@ -197,6 +203,20 @@ def test_success_overlay_can_be_composited_the_way_the_deck_does_it():
     assert scaled.getchannel("A").getextrema() == (255, 255)
 
 
+def test_dial_flash_fills_the_slice():
+    # A dial never shows an overlay, so its confirmation is the whole picture
+    # and has to be readable and opaque on its own.
+    for text, ok in (("LIKED", True), ("REMOVED", True), ("FAILED", False)):
+        image = render_dial_flash(DIAL, text, ok=ok)
+        assert image.size == DIAL
+        assert not is_blank(image)
+        assert image.getpixel((2, 2)) != theme.BACKGROUND
+
+    assert render_dial_flash(DIAL, "LIKED").getpixel((2, 2)) != render_dial_flash(
+        DIAL, "FAILED", ok=False
+    ).getpixel((2, 2))
+
+
 # -- Song Stack ------------------------------------------------------------
 
 
@@ -213,6 +233,40 @@ def test_song_stack_shows_everything_it_is_asked_to():
     )
     assert result.image.size == KEY
     assert not is_blank(result.image)
+
+
+def test_play_context_key_shows_the_cover_whole():
+    image = render_artwork_key(KEY, Image.new("RGB", (300, 150), ARTWORK_COLOR), caption="PLAYLIST")
+    bounds, count = colour_bounds(image)
+
+    assert bounds is not None, "the cover should be visible"
+    x0, y0, x1, y1 = bounds
+    width, height = x1 - x0 + 1, y1 - y0 + 1
+    assert abs(width / height - 2.0) < 0.1, f"aspect ratio changed: {width}x{height}"
+    # The caption sits under the art, never over it.
+    assert count == width * height, "something is overlapping the cover"
+    assert not is_blank(image)
+
+
+def test_play_context_key_without_a_cover_still_draws():
+    # The key is drawn before the cover has been fetched, and after a link with
+    # no cover at all.
+    assert not is_blank(render_artwork_key(SMALL_KEY, None, caption="ALBUM"))
+    assert render_artwork_key(KEY, None).size == KEY
+
+
+def test_a_name_too_long_for_the_key_is_ellipsised_not_spilled():
+    # Names come from Spotify, so the key has to cope with any of them; a label
+    # cannot scroll here the way a title on a dial can.
+    for size in (KEY, SMALL_KEY):
+        for image in (
+            render_artwork_key(size, artwork(), caption=LONG_TITLE),
+            render_glyph_key(size, "play_context", caption=LONG_TITLE),
+        ):
+            assert image.size == size
+            # Text that overran would paint into the outermost columns.
+            edges = image.crop((0, 0, 1, size[1])), image.crop((size[0] - 1, 0, size[0], size[1]))
+            assert all(is_blank(edge) for edge in edges), "the caption ran off the key"
 
 
 def test_artwork_is_never_cropped_or_stretched():

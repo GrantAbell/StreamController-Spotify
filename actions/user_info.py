@@ -34,6 +34,12 @@ class UserInfoAction(SpotifyActionBase):
             )
         )
 
+    def on_action_ready(self) -> None:
+        # The profile is fetched when authentication changes, and starting up
+        # with a stored token is not a change; ask for it directly, the way the
+        # Like action asks for its own state.
+        self.manager.ensure_profile()
+
     def _on_press(self, _data=None) -> None:
         profile = self.manager.profile
         target = profile.external_url if profile else None

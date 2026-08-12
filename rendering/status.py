@@ -120,3 +120,32 @@ def render_success_overlay(size: tuple[int, int], text: str = "DONE") -> Image.I
     font = fit_font(draw, text, int(width * 0.9), int(height * 0.24), bold=True)
     draw_centered_text(draw, text, width / 2, int(height * 0.60), font, theme.WHITE)
     return image.convert("RGBA")
+
+
+def render_dial_flash(size: tuple[int, int], text: str = "DONE", *, ok: bool = True) -> Image.Image:
+    """The same confirmation, drawn as a whole dial slice.
+
+    StreamController composites `show_overlay` images onto keys only — the
+    touchscreen builds its picture from each dial's own image and never looks
+    at the overlay — so on a dial the confirmation has to *be* the image.
+    """
+    width, height = size
+    background = theme.GREEN_DIM if ok else theme.ERROR_DIM
+    image, draw = new_canvas(size, background)
+
+    glyph_size = int(height * 0.46)
+    paste_icon(
+        image,
+        "success" if ok else STATUS_ICONS["api_error"],
+        glyph_size,
+        (int(width * 0.17), height // 2),
+        theme.WHITE,
+        background,
+    )
+
+    text_left = int(width * 0.32)
+    font = fit_font(draw, text, width - text_left - int(width * 0.06), int(height * 0.40), bold=True)
+    _, top_offset, _, bottom = draw.textbbox((0, 0), text, font=font)
+    draw.text((text_left, (height - (bottom - top_offset)) / 2 - top_offset), text, font=font, fill=theme.WHITE)
+
+    return image

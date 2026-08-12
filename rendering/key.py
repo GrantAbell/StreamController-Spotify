@@ -69,8 +69,48 @@ def render_glyph_key(
         )
 
     if has_caption:
-        font = fit_font(draw, caption, int(width * 0.86), int(caption_band * 0.66), bold=True)
-        draw_centered_text(draw, caption, width / 2, height - caption_band + int(caption_band * 0.1), font, caption_color)
+        from .common import shorten_to_width
+
+        text_width = int(width * 0.86)
+        font = fit_font(draw, caption, text_width, int(caption_band * 0.66), bold=True)
+        # Captions are mostly short words, but an action can put a name here.
+        text = shorten_to_width(draw, caption, font, text_width)
+        draw_centered_text(draw, text, width / 2, height - caption_band + int(caption_band * 0.1), font, caption_color)
+
+    return image
+
+
+def render_artwork_key(
+    size: tuple[int, int],
+    artwork: Image.Image | None,
+    *,
+    caption: str | None = None,
+    caption_color=theme.WHITE,
+) -> Image.Image:
+    """Cover art with its name underneath, for a key that stands for one thing.
+
+    The caption gets a reserved band rather than an overlay: Spotify's rules say
+    artwork must not be cropped, stretched or covered, so nothing is drawn on
+    top of it and it is only ever letterboxed into the space that is left.
+
+    A name is shrunk to fit and then ellipsised, because it cannot scroll here
+    and a key that spills its label off both edges reads as broken.
+    """
+    from .common import paste_artwork, shorten_to_width
+
+    width, height = size
+    image, draw = new_canvas(size)
+
+    caption_band = int(height * 0.20) if caption else 0
+    margin = max(2, int(min(width, height) * 0.05))
+
+    paste_artwork(image, artwork, (margin, margin, width - margin, height - caption_band - margin))
+
+    if caption:
+        text_width = int(width * 0.92)
+        font = fit_font(draw, caption, text_width, int(caption_band * 0.72), bold=True)
+        text = shorten_to_width(draw, caption, font, text_width)
+        draw_centered_text(draw, text, width / 2, height - caption_band + int(caption_band * 0.08), font, caption_color)
 
     return image
 

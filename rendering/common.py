@@ -52,6 +52,21 @@ def draw_centered_text(
     return height
 
 
+def shorten_to_width(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> str:
+    """`text` trimmed with an ellipsis until it fits.
+
+    For labels that cannot scroll and must not run off the key — a name already
+    shrunk to the smallest readable size still has to stop somewhere.
+    """
+    if text_width(draw, text, font) <= max_width:
+        return text
+
+    trimmed = text
+    while trimmed and text_width(draw, trimmed + "…", font) > max_width:
+        trimmed = trimmed[:-1]
+    return f"{trimmed.rstrip()}…" if trimmed else "…"
+
+
 def draw_clipped_text(
     image: Image.Image,
     text: str,

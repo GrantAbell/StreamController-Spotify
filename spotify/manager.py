@@ -33,6 +33,7 @@ from .errors import (
 from .log import debug, log
 from .models import (
     EMPTY_PLAYBACK,
+    context_image_url,
     PlaybackState,
     SpotifyDevice,
     SpotifyPlaylist,
@@ -55,7 +56,7 @@ from .state import (
     playback_status,
     seek_target_ms,
 )
-from .uri import parse_resource
+from .uri import open_targets, parse_resource, uri_type
 
 TOPIC_PLAYBACK = "playback"
 TOPIC_AUTH = "auth"
@@ -74,6 +75,25 @@ OPTIMISTIC_TTL = 3.0
 #: Idle polling when nothing is playing, so an untouched deck is not making a
 #: request every second all day.
 IDLE_POLL_MULTIPLIER = 4
+
+#: How long to leave `/me` alone after it failed, so a broken grant does not
+#: turn into a request per poll.
+PROFILE_RETRY_SECONDS = 60.0
+
+#: The running Spotify desktop client. Reaching it here rather than through its
+#: command line is what keeps "open this" from disturbing what it is playing.
+MPRIS_NAME = "org.mpris.MediaPlayer2.spotify"
+MPRIS_PATH = "/org/mpris/MediaPlayer2"
+MPRIS_ROOT_INTERFACE = "org.mpris.MediaPlayer2"
+MPRIS_PLAYER_INTERFACE = "org.mpris.MediaPlayer2.Player"
+MPRIS_TIMEOUT_MS = 1500
+
+#: How long the client is given to take the URI before playback is handed back.
+NAVIGATE_SETTLE_SECONDS = 0.8
+
+#: Contexts `play` will start again. Anything else — Liked Songs, a bare track —
+#: cannot be restored without flattening the queue into one track.
+RESTORABLE_CONTEXT_TYPES = frozenset({"playlist", "album", "artist", "show"})
 
 
 class SpotifyManager:
@@ -112,14 +132,21 @@ class SpotifyManager:
         self._profile: UserProfile | None = None
         self._playlists: list[SpotifyPlaylist] | None = None
         self._playlists_loading = False
+        self._profile_loading = False
+        self._profile_retry_after = 0.0
         self._liked: PagedCache[SpotifyTrack] = PagedCache(page_size=MAX_PAGE_SIZE)
 
         self._like_state: TtlCache[str, bool] = TtlCache(ttl_seconds=900.0)
         self._like_pending: set[str] = set()
-        self._context_names: TtlCache[str, str] = TtlCache(ttl_seconds=1800.0)
+        #: Name and cover per URI, resolved on demand; see ensure_context_details.
+        self._context_details: TtlCache[str, dict] = TtlCache(ttl_seconds=1800.0)
         self._context_requested: set[str] = set()
 
         self._optimistic: dict[str, tuple[object, float]] = {}
+        #: The state as the actions last drew it, optimistic values included.
+        #: What a poll is compared against, so that an optimistic value dying is
+        #: itself a change worth redrawing for.
+        self._published_playback: PlaybackState | None = None
         self._last_nonzero_volume: dict[str, int] = {}
 
         self._rate_limited_until: float = 0.0
@@ -135,6 +162,9 @@ class SpotifyManager:
         #: effect. Spotify's own state lags its commands slightly, so polling
         #: instantly would just re-read the old value. Tests set this to zero.
         self.command_settle_seconds = 0.25
+        #: How long the Spotify client is given to take a URI before playback
+        #: is handed back to it. Tests set this to zero.
+        self.navigate_settle_seconds = NAVIGATE_SETTLE_SECONDS
         self._wake = threading.Event()
         self._stopping = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -222,6 +252,13 @@ class SpotifyManager:
                 listeners.discard(callback)
 
     def _notify(self, *topics: str) -> None:
+        if TOPIC_PLAYBACK in topics:
+            # Remember what the actions are about to draw, so the next poll can
+            # tell whether what they are showing is still true.
+            published = self.get_playback_state()
+            with self._lock:
+                self._published_playback = published
+
         with self._lock:
             callbacks: set[Callable[[], None]] = set()
             for topic in topics:
@@ -248,12 +285,14 @@ class SpotifyManager:
     def _on_auth_changed(self) -> None:
         if self.auth.is_authenticated:
             self._wake.set()
-            self.submit(self._refresh_profile, coalesce_key="profile")
+            self.ensure_profile()
         else:
             with self._lock:
                 self._playback = EMPTY_PLAYBACK
                 self._devices = []
                 self._profile = None
+                self._profile_loading = False
+                self._profile_retry_after = 0.0
                 self._playlists = None
                 self._optimistic.clear()
                 self._like_state.clear()
@@ -545,6 +584,7 @@ class SpotifyManager:
                 continue
 
             try:
+                self.ensure_profile()
                 self._poll_playback()
 
                 now = time.monotonic()
@@ -594,9 +634,15 @@ class SpotifyManager:
             self.artwork.prefetch(state.track.artwork_url)
 
         if state.context_uri:
-            self._ensure_context_name(state.context_uri)
+            self.ensure_context_details(state.context_uri)
 
-        if _has_visible_change(previous, state):
+        # Against what the actions are showing, not against the last raw poll:
+        # an optimistic value that expired or was dropped changes the picture
+        # without changing anything Spotify reported, and a key left drawing it
+        # would stay wrong until something unrelated moved.
+        with self._lock:
+            published = self._published_playback
+        if _has_visible_change(published or previous, self.get_playback_state()):
             self._notify(TOPIC_PLAYBACK)
 
     def _reconcile_optimistic(self, state: PlaybackState) -> None:
@@ -659,10 +705,42 @@ class SpotifyManager:
     def refresh_devices(self) -> None:
         self.submit(self._refresh_devices, coalesce_key="devices")
 
+    def ensure_profile(self) -> None:
+        """Fetch `/me` if it is missing.
+
+        Authenticating triggers this, but starting up with a token already on
+        disk is not an authentication *change* — nothing fires — so the User
+        Information action would otherwise sit on "…" until the next sign-in.
+        Every action asks on ready, which covers a page that has no other
+        Spotify action to keep the poll loop running.
+        """
+        if not self.auth.is_authenticated:
+            return
+
+        with self._lock:
+            if self._profile is not None or self._profile_loading:
+                return
+            if time.monotonic() < self._profile_retry_after:
+                return
+            self._profile_loading = True
+
+        self.submit(self._refresh_profile, coalesce_key="profile")
+
     def _refresh_profile(self) -> None:
-        profile = parse_profile(self.api.get_profile())
+        try:
+            profile = parse_profile(self.api.get_profile())
+        except Exception:
+            with self._lock:
+                self._profile_loading = False
+                self._profile_retry_after = time.monotonic() + PROFILE_RETRY_SECONDS
+            raise
+
         with self._lock:
             self._profile = profile
+            self._profile_loading = False
+            if profile is None:
+                self._profile_retry_after = time.monotonic() + PROFILE_RETRY_SECONDS
+
         if profile is not None and profile.is_premium is False:
             log.warning("Spotify: this account is not Premium; playback control will be refused by Spotify")
         self._notify(TOPIC_AUTH)
@@ -982,12 +1060,22 @@ class SpotifyManager:
     # -- contexts ---------------------------------------------------------
 
     def get_context_name(self, uri: str | None) -> str | None:
-        if not uri:
-            return None
-        return self._context_names.get(uri)
+        return (self._context_details.get(uri) or {}).get("name") if uri else None
 
-    def _ensure_context_name(self, uri: str) -> None:
-        if self._context_names.get(uri) is not None:
+    def get_context_artwork_url(self, uri: str | None) -> str | None:
+        """The cover for a playlist, album, artist, show or item, if resolved."""
+        return (self._context_details.get(uri) or {}).get("image_url") if uri else None
+
+    def ensure_context_details(self, uri: str | None) -> None:
+        """Resolve a URI's name and cover once, and cache both.
+
+        Called for whatever is playing, and by any action showing a URI the
+        user configured. One request per distinct URI per half hour, whether
+        the answer is wanted for its name, its cover, or both.
+        """
+        if not uri:
+            return
+        if self._context_details.get(uri) is not None:
             return
         with self._lock:
             if uri in self._context_requested:
@@ -996,10 +1084,17 @@ class SpotifyManager:
 
         def work():
             try:
-                payload = self.api.get_context(uri)
-                name = (payload or {}).get("name")
-                if name:
-                    self._context_names.put(uri, name)
+                payload = self.api.get_context(uri) or {}
+                # A user profile carries `display_name` where everything else
+                # carries `name`.
+                details = {
+                    "name": payload.get("name") or payload.get("display_name"),
+                    "image_url": context_image_url(payload),
+                }
+                # Cached even when empty, so a context with no cover is not
+                # asked about again on every redraw.
+                self._context_details.put(uri, details)
+                if details["name"] or details["image_url"]:
                     self._notify(TOPIC_PLAYBACK)
             finally:
                 with self._lock:
@@ -1045,13 +1140,154 @@ class SpotifyManager:
     # -- misc -------------------------------------------------------------
 
     def open_in_spotify(self, url_or_uri: str | None) -> bool:
-        """Hand a Spotify link to the desktop, preferring GIO over a browser."""
-        if not url_or_uri:
+        """Open something in the Spotify desktop app, or the web player.
+
+        A client that is already running is spoken to over MPRIS. Handing the
+        URI to the desktop entry instead reaches the same client through its
+        command line, and that makes it drop what it is playing — which is the
+        whole reason this goes the long way round.
+        """
+        prefer_app = bool(self.setting("open_links_in_app", True))
+        targets = open_targets(url_or_uri, prefer_app=prefer_app)
+
+        for target in targets:
+            if target.startswith("spotify:") and self._show_in_running_app(target):
+                return True
+            if self._launch_uri(target):
+                return True
+
+        if url_or_uri:
+            log.warning("Spotify: could not open the link")
+        return False
+
+    def _show_in_running_app(self, uri: str) -> bool:
+        """Show `uri` in the Spotify client that is already running.
+
+        False means no client answered, which is when launching one is the
+        right thing to do.
+
+        Being told to open something collapses the client's player: within
+        about ten seconds it abandons the track it is on, and the queue behind
+        it never starts. That happens through its command line and through
+        MPRIS alike, so the way round it is to take playback out of the
+        client's hands for the moment it navigates — pause, open, then play the
+        same context, track and position back. What the user hears is a blip.
+        """
+        try:
+            import gi
+
+            gi.require_version("Gtk", "4.0")
+            from gi.repository import Gio, GLib
+        except Exception:  # noqa: BLE001 - no GTK: nothing to talk to the bus with
             return False
 
-        resource = parse_resource(url_or_uri)
-        target = resource.external_url if resource else url_or_uri
+        def call(interface: str, method: str, arguments) -> None:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            bus.call_sync(
+                MPRIS_NAME,
+                MPRIS_PATH,
+                interface,
+                method,
+                arguments,
+                None,
+                # Never start a client: an absent one is the caller's cue to
+                # launch it properly, with the URI.
+                Gio.DBusCallFlags.NO_AUTO_START,
+                MPRIS_TIMEOUT_MS,
+                None,
+            )
 
+        def navigate() -> None:
+            call(MPRIS_PLAYER_INTERFACE, "OpenUri", GLib.Variant("(s)", (uri,)))
+
+        try:
+            # First, because it proves a client is there to talk to and it is
+            # the one call that cannot disturb anything. Failing here is what
+            # tells the caller to launch the app instead — before playback has
+            # been touched.
+            call(MPRIS_ROOT_INTERFACE, "Raise", None)
+        except Exception:  # noqa: BLE001 - not running, or no MPRIS support
+            debug(f"Spotify: no running client answered for {uri}")
+            return False
+
+        restore = self._restore_point()
+
+        try:
+            if not self._playback_is_live():
+                navigate()
+            elif restore is not None:
+                self._navigate_around_playback(navigate, restore)
+            # Otherwise there is nothing to put playback back with, so the
+            # window has been raised and the queue left alone: better a press
+            # that only raises than one that costs the user their queue.
+        except Exception:  # noqa: BLE001
+            # The client is there and has been raised, so this press has been
+            # handled; falling back to the launcher from here would hand the
+            # URI to the client's command line, which is what wrecks playback.
+            log.exception("Spotify: could not show the item in the running client")
+
+        return True
+
+    def _navigate_around_playback(self, navigate: Callable[[], None], restore: dict) -> None:
+        """Navigate with playback parked, then put it back exactly as it was."""
+        self.api.pause(device_id=restore["device_id"])
+        started = time.monotonic()
+        try:
+            navigate()
+            if self.navigate_settle_seconds:
+                time.sleep(self.navigate_settle_seconds)
+        finally:
+            # However the navigation went, playback has to come back.
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            self.api.play(
+                device_id=restore["device_id"],
+                context_uri=restore["context_uri"],
+                offset={"uri": restore["track_uri"]},
+                position_ms=restore["position_ms"] + elapsed_ms,
+            )
+            if not restore["was_playing"]:
+                self.api.pause(device_id=restore["device_id"])
+            self.refresh_now()
+
+    def _restore_point(self) -> dict | None:
+        """What it would take to put playback back exactly where it is now.
+
+        None when there is nothing to put it back into: without a context that
+        `play` accepts, resuming would replace the queue with a single track,
+        which is the very thing being protected here.
+        """
+        with self._lock:
+            state = self._playback
+
+        if state is EMPTY_PLAYBACK or not state.has_playback:
+            return None
+        if state.track is None or not state.track.uri or not state.context_uri:
+            return None
+        if uri_type(state.context_uri) not in RESTORABLE_CONTEXT_TYPES:
+            return None
+
+        return {
+            "context_uri": state.context_uri,
+            "track_uri": state.track.uri,
+            "position_ms": max(0, interpolated_progress_ms(state) or 0),
+            "was_playing": bool(state.is_playing),
+            "device_id": state.device.id if state.device else None,
+        }
+
+    def _playback_is_live(self) -> bool:
+        """Whether there is a session that opening something would destroy.
+
+        Paused counts: the queue is still there to lose.
+        """
+        with self._lock:
+            state = self._playback
+        if state is EMPTY_PLAYBACK:
+            # Nothing polled yet, so assume there is something to protect.
+            return True
+        return state.has_playback
+
+    def _launch_uri(self, target: str) -> bool:
+        """One attempt at handing `target` to the desktop, GIO before a browser."""
         try:
             import gi
 
@@ -1063,12 +1299,16 @@ class SpotifyManager:
         except Exception:  # noqa: BLE001 - no GTK, or no handler registered
             pass
 
+        # Only http links: webbrowser's generic handlers would hand a
+        # `spotify:` URI straight to the browser, which is what this avoids.
+        if not target.startswith("http"):
+            return False
+
         try:
             import webbrowser
 
             return webbrowser.open(target)
         except Exception:  # noqa: BLE001
-            log.warning("Spotify: could not open the link")
             return False
 
 

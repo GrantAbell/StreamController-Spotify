@@ -141,6 +141,19 @@ class SpotifySettingsArea:
         seek_row.connect("changed", lambda row: self.plugin.set_plugin_setting("default_seek_seconds", int(row.get_value())))
         group.add(seek_row)
 
+        open_row = Adw.SwitchRow(
+            title="Open links in the Spotify app",
+            subtitle="The desktop client drops its queue when told to open something, so playback is "
+            "parked for a moment and put back where it was — you hear a brief blip. Off uses the web "
+            "player in your browser instead.",
+        )
+        open_row.set_active(bool(self.plugin.plugin_setting("open_links_in_app", True)))
+        open_row.connect(
+            "notify::active",
+            lambda row, _param: self.plugin.set_plugin_setting("open_links_in_app", row.get_active()),
+        )
+        group.add(open_row)
+
         marquee_row = Adw.SwitchRow(title="Scroll long text", subtitle="Applies to every action that shows a title.")
         marquee_row.set_active(bool(self.plugin.plugin_setting("marquee_enabled", True)))
         marquee_row.connect("notify::active", self._on_marquee_toggled)
@@ -220,6 +233,9 @@ class SpotifySettingsArea:
 
     def refresh(self) -> None:
         """Update the status rows. Safe to call from any thread."""
+        # The account row draws the profile, which nothing fetches on a start
+        # with a token already stored.
+        self.manager.ensure_profile()
         GLib.idle_add(self._do_refresh)
 
     def _do_refresh(self) -> bool:

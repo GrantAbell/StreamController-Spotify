@@ -24,7 +24,7 @@ class LruCache(Generic[K, V]):
         self._items: OrderedDict[K, V] = OrderedDict()
         self._lock = threading.Lock()
 
-    def get(self, key: K, default: V = None) -> V:
+    def get(self, key: K, default: V | None = None) -> V | None:
         with self._lock:
             if key not in self._items:
                 return default
@@ -54,7 +54,7 @@ class LruCache(Generic[K, V]):
 class TtlCache(Generic[K, V]):
     """Values that are worth remembering but must not be trusted forever.
 
-    Used for liked-state per track URI and for resolved context names, both of
+    Used for liked-state per track URI and for resolved context details, both of
     which can be changed from outside StreamController.
     """
 
@@ -64,7 +64,7 @@ class TtlCache(Generic[K, V]):
         self._items: OrderedDict[K, tuple[float, V]] = OrderedDict()
         self._lock = threading.Lock()
 
-    def get(self, key: K, default: V = None) -> V:
+    def get(self, key: K, default: V | None = None) -> V | None:
         now = time.monotonic()
         with self._lock:
             entry = self._items.get(key)

@@ -9,9 +9,11 @@ requests, not forty".
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 import pytest
 
+from spotify_essentials.spotify.api import Endpoints
 from spotify_essentials.spotify.auth import TokenSet, TokenStore
 from spotify_essentials.spotify.errors import (
     SpotifyApiError,
@@ -111,6 +113,55 @@ def test_listeners_are_notified_only_on_a_visible_change(manager):
     manager.api.playback["is_playing"] = False
     poll(manager)
     assert len(calls) == 2
+
+
+def test_a_mode_spotify_never_applied_stops_being_shown(manager):
+    # The Mode Stack bug: the key shows the mode the press asked for, Spotify
+    # never applies it, and nothing Spotify reports changes — so a comparison
+    # against the last poll sees nothing and the key keeps drawing a lie.
+    manager.api.playback["repeat_state"] = "context"
+    poll(manager)
+
+    shown = []
+    manager.add_listener(lambda: shown.append(manager.get_playback_state().repeat_mode), {"playback"})
+
+    manager.set_repeat("track")
+    manager._queue.take(timeout=0)  # drop the command: Spotify never hears it
+    assert manager.get_playback_state().repeat_mode == "track", "the press should show at once"
+    assert shown == ["track"]
+
+    manager._optimistic["repeat_mode"] = ("track", time.monotonic() - 0.01)
+    poll(manager)
+
+    assert manager.get_playback_state().repeat_mode == "context"
+    assert shown[-1] == "context", "the key was never told the mode went back"
+
+
+def test_a_mode_change_made_elsewhere_reaches_the_key(manager):
+    # Changed in the Spotify app rather than on the deck.
+    poll(manager)
+    shown = []
+    manager.add_listener(lambda: shown.append(manager.get_playback_state()), {"playback"})
+
+    manager.api.playback["repeat_state"] = "track"
+    manager.api.playback["shuffle_state"] = True
+    poll(manager)
+
+    assert [(state.repeat_mode, state.shuffle) for state in shown] == [("track", True)]
+
+
+def test_a_confirmed_mode_does_not_redraw_twice(manager):
+    # settle() first: a first poll also queues the context and liked lookups,
+    # and those notify on their own account.
+    settle(manager)
+    calls = []
+    manager.add_listener(lambda: calls.append(1), {"playback"})
+
+    manager.set_repeat("track")  # one notify: the optimistic value
+    drain(manager)               # the fake applies it
+    poll(manager)                # Spotify now agrees, so nothing new to draw
+
+    assert len(calls) == 1
 
 
 def test_removed_listeners_stop_being_called(manager):
@@ -573,12 +624,41 @@ def test_context_names_are_resolved_once_and_cached(manager):
     drain(manager)
 
     assert manager.get_context_name("spotify:playlist:37i9dQZF1DXcBWIGoYBM5M") == "Today's Top Hits"
+    # The same lookup carries the cover, so a key showing one costs no request
+    # of its own.
+    assert manager.get_context_artwork_url("spotify:playlist:37i9dQZF1DXcBWIGoYBM5M") == "https://i.example/context.jpg"
 
     before = len(manager.api.calls)
     poll(manager)
     drain(manager)
     assert len(manager.api.calls_to("context:spotify:playlist:37i9dQZF1DXcBWIGoYBM5M")) == 1
     assert len(manager.api.calls) >= before
+
+
+def test_a_configured_link_can_be_resolved_without_playing_it(manager):
+    # What the Play Context key needs: the cover for a link the user typed,
+    # which has nothing to do with what is playing.
+    uri = "spotify:playlist:configured"
+
+    for _ in range(4):
+        manager.ensure_context_details(uri)
+        drain(manager)
+
+    assert manager.get_context_artwork_url(uri) == "https://i.example/context.jpg"
+    assert manager.get_context_name(uri) == "Today's Top Hits"
+    assert len(manager.api.calls_to(f"context:{uri}")) == 1
+
+
+def test_a_context_with_no_cover_is_not_asked_about_again(manager):
+    uri = "spotify:playlist:bare"
+    manager.api.get_context = lambda asked: {"name": None}
+
+    manager.ensure_context_details(uri)
+    drain(manager)
+    manager.ensure_context_details(uri)
+
+    assert drain(manager) == 0
+    assert manager.get_context_artwork_url(uri) is None
 
 
 # -- lifecycle -------------------------------------------------------------
@@ -716,3 +796,195 @@ def test_playing_a_playlist_wakes_an_idle_device(manager):
     call = manager.api.calls_to("/me/player/play")[0]
     assert call.detail["context_uri"] == "spotify:playlist:pl1"
     assert call.detail["device_id"] == "device-1"
+
+
+# -- opening links ---------------------------------------------------------
+
+
+def _record_launches(manager, succeed_on=None, running_client=False):
+    """Replace both hand-offs with recorders. Returns what was tried.
+
+    The MPRIS one is always replaced: left alone it would talk to whatever
+    Spotify client happens to be running on the machine running the tests.
+    """
+    tried: list[str] = []
+
+    def launch(target: str) -> bool:
+        tried.append(target)
+        return succeed_on is None or target.startswith(succeed_on)
+
+    def show(uri: str) -> bool:
+        if not running_client:
+            return False
+        tried.append(f"mpris:{uri}")
+        return True
+
+    manager._launch_uri = launch
+    manager._show_in_running_app = show
+    return tried
+
+
+def test_opening_a_track_goes_to_the_app_first(manager):
+    tried = _record_launches(manager)
+
+    assert manager.open_in_spotify("spotify:track:t1")
+    # The app took it, so the web player was never tried.
+    assert tried == ["spotify:track:t1"]
+
+
+def test_a_running_client_is_spoken_to_rather_than_launched(manager):
+    # Launching hands the URI to the client's command line, which makes it drop
+    # what it is playing; a client that is already up is asked directly.
+    tried = _record_launches(manager, running_client=True)
+
+    assert manager.open_in_spotify("spotify:track:t1")
+    assert tried == ["mpris:spotify:track:t1"]
+
+
+def test_the_web_player_catches_a_missing_app(manager):
+    tried = _record_launches(manager, succeed_on="https://")
+
+    assert manager.open_in_spotify("spotify:track:t1")
+    assert tried == ["spotify:track:t1", "https://open.spotify.com/track/t1"]
+
+
+def test_the_browser_can_be_chosen_instead(manager):
+    manager._settings_provider = lambda: {"open_links_in_app": False}
+    tried = _record_launches(manager)
+
+    assert manager.open_in_spotify("spotify:track:t1")
+    assert tried == ["https://open.spotify.com/track/t1"]
+
+
+def test_opening_nothing_fails_without_trying(manager):
+    tried = _record_launches(manager)
+
+    assert not manager.open_in_spotify(None)
+    assert not manager.open_in_spotify("")
+    assert tried == []
+
+
+def test_a_restore_point_describes_where_playback_is(manager):
+    poll(manager)
+    state = manager.get_playback_state()
+    restore = manager._restore_point()
+
+    assert restore["context_uri"] == state.context_uri
+    assert restore["track_uri"] == state.track.uri
+    assert restore["was_playing"] is True
+    assert restore["position_ms"] >= state.progress_ms
+
+
+def test_there_is_no_restore_point_without_a_context_to_restore_into(manager):
+    # Liked Songs and a bare track cannot be handed back to `play` as a
+    # context, and restoring with `uris` would flatten the queue to one track.
+    poll(manager)
+    manager._playback = replace(manager._playback, context_uri="spotify:collection:tracks")
+    assert manager._restore_point() is None
+
+    manager.api.playback = None
+    poll(manager)
+    assert manager._restore_point() is None
+
+
+def test_navigating_parks_playback_and_puts_it_back(manager):
+    manager.navigate_settle_seconds = 0
+    poll(manager)
+    restore = manager._restore_point()
+    navigated = []
+
+    manager._navigate_around_playback(lambda: navigated.append("open"), restore)
+
+    assert navigated == ["open"]
+    # Paused first so the client cannot collapse mid-track, then given the same
+    # context, track and place back.
+    assert manager.api.paths()[-2:] == ["/me/player/pause", "/me/player/play"]
+    resumed = manager.api.calls_to("/me/player/play")[-1]
+    assert resumed.detail["context_uri"] == restore["context_uri"]
+    assert resumed.detail["device_id"] == restore["device_id"]
+
+
+def test_navigating_leaves_a_paused_player_paused(manager):
+    manager.navigate_settle_seconds = 0
+    manager.api.playback["is_playing"] = False
+    poll(manager)
+
+    manager._navigate_around_playback(lambda: None, manager._restore_point())
+
+    assert manager.api.paths()[-3:] == ["/me/player/pause", "/me/player/play", "/me/player/pause"]
+
+
+def test_playback_comes_back_even_if_the_navigation_fails(manager):
+    manager.navigate_settle_seconds = 0
+    poll(manager)
+
+    def boom():
+        raise RuntimeError("no client")
+
+    with pytest.raises(RuntimeError):
+        manager._navigate_around_playback(boom, manager._restore_point())
+
+    assert manager.api.paths()[-1] == "/me/player/play"
+
+
+def test_a_live_session_is_never_navigated_away_from(manager):
+    # Telling the client to open something wedges it at the end of the current
+    # track, so anything playing — or paused, which still holds a queue — means
+    # the window is only raised.
+    assert manager._playback_is_live(), "nothing polled yet: assume there is something to lose"
+
+    poll(manager)
+    assert manager._playback_is_live()
+
+    manager.api.playback["is_playing"] = False
+    poll(manager)
+    assert manager._playback_is_live()
+
+    manager.api.playback = None
+    poll(manager)
+    assert not manager._playback_is_live()
+
+
+# -- the profile -----------------------------------------------------------
+
+
+def test_the_profile_is_fetched_when_it_is_missing(manager):
+    # Starting up with a token already on disk is not an auth *change*, so
+    # nothing else would ever ask for /me.
+    assert manager.profile is None
+
+    manager.ensure_profile()
+    drain(manager)
+
+    assert manager.profile is not None
+    assert len(manager.api.calls_to(Endpoints.ME)) == 1
+
+
+def test_the_profile_is_fetched_once_not_per_poll(manager):
+    # The poll loop asks on every pass; only the first one costs a request.
+    for _ in range(5):
+        manager.ensure_profile()
+    drain(manager)
+    for _ in range(5):
+        manager.ensure_profile()
+    drain(manager)
+
+    assert len(manager.api.calls_to(Endpoints.ME)) == 1
+
+
+def test_a_failed_profile_fetch_is_retried_later_not_immediately(manager):
+    manager.api.raise_next = SpotifyApiError(500)
+
+    manager.ensure_profile()
+    drain(manager)
+    assert manager.profile is None
+
+    # Still backing off, so a second ask costs nothing.
+    manager.ensure_profile()
+    assert drain(manager) == 0
+
+    manager._profile_retry_after = 0.0
+    manager.ensure_profile()
+    drain(manager)
+
+    assert manager.profile is not None

@@ -12,6 +12,9 @@ work to the manager and returns.
 
 from __future__ import annotations
 
+import threading
+import time
+
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -68,6 +71,11 @@ class SpotifyActionBase(ActionCore):
         self._last_signature = None
         self._device_group: Adw.PreferencesGroup | None = None
         self._device_rows: list = []
+
+        # Drawn-in confirmation, used where an overlay would not show; see flash().
+        self._flash: tuple[str, bool] | None = None
+        self._flash_until = 0.0
+        self._flash_timer: threading.Timer | None = None
 
         # Settings are not written here: StreamController only registers an
         # action on its page after every action has been constructed, so
@@ -228,6 +236,8 @@ class SpotifyActionBase(ActionCore):
         if self._marquee_registered and self.marquee is not None:
             self.marquee.unregister(self.marquee_key)
             self._marquee_registered = False
+        self._cancel_flash_timer()
+        self._flash = None
 
     # -- rendering --------------------------------------------------------
 
@@ -251,12 +261,15 @@ class SpotifyActionBase(ActionCore):
             if not self.has_image_control():
                 return
 
-            signature = self.state_signature()
+            flash = self._active_flash()
+            # A flash replaces the picture, so it also replaces the signature:
+            # otherwise an action whose state has not moved skips the redraw.
+            signature = ("flash", flash) if flash is not None else self.state_signature()
             if signature is not None and signature == self._last_signature:
                 return
             self._last_signature = signature
 
-            image = self.render_image()
+            image = self.render_flash_image(*flash) if flash is not None else self.render_image()
             if image is not None:
                 self.set_media(image=image)
         except Warning:
@@ -309,8 +322,19 @@ class SpotifyActionBase(ActionCore):
 
         return None
 
+    def render_flash_image(self, text: str, ok: bool):
+        """The picture a drawn-in flash replaces the action's own image with."""
+        return status_render.render_dial_flash(self.image_size(), text, ok=ok)
+
     def flash(self, text: str, duration: float = 1.2) -> None:
-        """Brief confirmation overlay for an action that succeeded."""
+        """Brief confirmation for an action that succeeded."""
+        # StreamController only composites overlays onto keys — a dial's picture
+        # is assembled from the dial images alone — so on a dial the
+        # confirmation is drawn as the image instead of shown over it.
+        if self.is_dial:
+            self._flash_inline(text, duration, ok=True)
+            return
+
         try:
             if not self.get_is_present() or self.get_is_multi_action():
                 return
@@ -333,12 +357,62 @@ class SpotifyActionBase(ActionCore):
             pass
 
     def report_failure(self, duration: float = 1.5) -> None:
+        # show_error() is the same overlay mechanism as flash(), so a dial needs
+        # the same treatment.
+        if self.is_dial:
+            self._flash_inline("FAILED", duration, ok=False)
+            return
+
         try:
             self.show_error(duration=duration)
         except Warning:
             pass
         except Exception:  # noqa: BLE001
             pass
+
+    # -- drawn-in flashes -------------------------------------------------
+
+    def _flash_inline(self, text: str, duration: float, ok: bool) -> None:
+        seconds = max(0.1, float(duration))
+
+        try:
+            if not self.get_is_present() or self.get_is_multi_action():
+                return
+        except Exception:  # noqa: BLE001 - a missing input just means no flash
+            return
+
+        self._cancel_flash_timer()
+        self._flash = (text, ok)
+        self._flash_until = time.monotonic() + seconds
+
+        # Nothing else guarantees a redraw once the flash is over: actions
+        # without a tick only redraw when the Spotify state moves.
+        timer = threading.Timer(seconds + 0.05, self._on_flash_over)
+        timer.daemon = True
+        self._flash_timer = timer
+        timer.start()
+
+        self._last_signature = None
+        self.render()
+
+    def _active_flash(self) -> tuple[str, bool] | None:
+        if self._flash is None:
+            return None
+        if time.monotonic() >= self._flash_until:
+            self._flash = None
+            return None
+        return self._flash
+
+    def _on_flash_over(self) -> None:
+        self._flash = None
+        self._flash_timer = None
+        self._last_signature = None
+        self.render()
+
+    def _cancel_flash_timer(self) -> None:
+        timer, self._flash_timer = self._flash_timer, None
+        if timer is not None:
+            timer.cancel()
 
     # -- marquee ----------------------------------------------------------
 

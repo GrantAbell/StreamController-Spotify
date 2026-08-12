@@ -14,6 +14,7 @@ from spotify_essentials.spotify.models import parse_track
 from spotify_essentials.spotify.uri import (
     external_url_for_uri,
     make_resource,
+    open_targets,
     parse_id,
     parse_resource,
     uri_type,
@@ -74,6 +75,40 @@ def test_context_and_item_classification():
 def test_external_url_round_trip():
     assert external_url_for_uri(f"spotify:track:{TRACK_ID}") == f"https://open.spotify.com/track/{TRACK_ID}"
     assert external_url_for_uri("rubbish") is None
+
+
+def test_open_targets_prefer_the_app_and_keep_the_web_player_as_a_fallback():
+    # The desktop app owns the spotify: scheme; the https link is the browser's.
+    assert open_targets(f"spotify:track:{TRACK_ID}") == [
+        f"spotify:track:{TRACK_ID}",
+        f"https://open.spotify.com/track/{TRACK_ID}",
+    ]
+    # A share URL still opens the app: everything is normalised first.
+    assert open_targets(f"https://open.spotify.com/album/{TRACK_ID}?si=abc")[0] == f"spotify:album:{TRACK_ID}"
+
+
+def test_open_targets_can_be_held_to_the_browser():
+    assert open_targets(f"spotify:artist:{TRACK_ID}", prefer_app=False) == [
+        f"https://open.spotify.com/artist/{TRACK_ID}"
+    ]
+
+
+def test_open_targets_still_reach_the_app_for_older_account_ids():
+    # User IDs are the one type that routinely falls outside base62, and a
+    # profile link should not lose the app over it.
+    assert open_targets("https://open.spotify.com/user/bob.smith") == [
+        "spotify:user:bob.smith",
+        "https://open.spotify.com/user/bob.smith",
+    ]
+    assert open_targets("spotify:user:bob.smith", prefer_app=False) == [
+        "https://open.spotify.com/user/bob.smith"
+    ]
+
+
+def test_open_targets_pass_through_what_they_cannot_parse():
+    assert open_targets("https://example.com/thing") == ["https://example.com/thing"]
+    assert open_targets(None) == []
+    assert open_targets("") == []
 
 
 def test_uri_type_and_make_resource():

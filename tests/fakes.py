@@ -271,7 +271,11 @@ class FakeSpotifyApi:
 
     def get_context(self, uri):
         self._record("GET", f"context:{uri}")
-        return {"name": "Today's Top Hits", "uri": uri}
+        return {
+            "name": "Today's Top Hits",
+            "uri": uri,
+            "images": [{"url": "https://i.example/context.jpg", "width": 300}],
+        }
 
 
 def playlist_payload(index: int) -> dict:
