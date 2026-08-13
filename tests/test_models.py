@@ -122,6 +122,22 @@ def test_invalid_repeat_and_shuffle_become_unknown():
     assert state.shuffle is None
 
 
+def test_smart_shuffle_comes_from_the_undocumented_field():
+    state = parse_playback(playback_payload(shuffle=True, smart_shuffle=True))
+
+    assert state.smart_shuffle is True
+    assert state.is_smart_shuffle is True
+
+
+def test_a_payload_without_smart_shuffle_is_not_smart():
+    # Spotify omits the key entirely rather than sending false, so the state has
+    # to say "not told" without that reading as "on".
+    state = parse_playback(playback_payload(shuffle=True))
+
+    assert state.smart_shuffle is None
+    assert state.is_smart_shuffle is False
+
+
 def test_pick_image_url_prefers_the_closest_size():
     images = [
         {"url": "big", "width": 640},

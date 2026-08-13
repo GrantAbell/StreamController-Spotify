@@ -107,6 +107,9 @@ class PlaybackState:
     volume_percent: int | None = None
 
     shuffle: bool | None = None
+    #: Spotify returns this alongside `shuffle_state` but has never documented
+    #: it, so it is None when absent rather than assumed to be off.
+    smart_shuffle: bool | None = None
     repeat_mode: str | None = None
 
     context_uri: str | None = None
@@ -127,6 +130,15 @@ class PlaybackState:
     def allows(self, action: str) -> bool:
         """Spotify's `actions.disallows` for the current context."""
         return action not in self.disallowed_actions
+
+    @property
+    def is_smart_shuffle(self) -> bool:
+        """Whether shuffle is currently Spotify's recommendation-mixing kind.
+
+        A missing field is not smart shuffle; the state a key draws has to be
+        one of the three Spotify can actually be in.
+        """
+        return bool(self.smart_shuffle)
 
 
 EMPTY_PLAYBACK = PlaybackState()
@@ -285,6 +297,11 @@ def parse_playback(payload: dict | None) -> PlaybackState:
     shuffle = payload.get("shuffle_state")
     shuffle = bool(shuffle) if isinstance(shuffle, bool) else None
 
+    # Undocumented, and only present on accounts and clients that have smart
+    # shuffle at all, so anything other than a bool means "Spotify did not say".
+    smart_shuffle = payload.get("smart_shuffle")
+    smart_shuffle = bool(smart_shuffle) if isinstance(smart_shuffle, bool) else None
+
     return PlaybackState(
         item_type=item_type,
         track=track,
@@ -293,6 +310,7 @@ def parse_playback(payload: dict | None) -> PlaybackState:
         duration_ms=track.duration_ms if track else None,
         volume_percent=device.volume_percent if device else None,
         shuffle=shuffle,
+        smart_shuffle=smart_shuffle,
         repeat_mode=repeat,
         context_uri=context.get("uri"),
         context_type=context.get("type"),
@@ -331,14 +349,55 @@ def parse_playlists(payload: dict | None) -> list[SpotifyPlaylist]:
     return [playlist for playlist in parsed if playlist is not None]
 
 
-def parse_saved_tracks(payload: dict | None) -> list[SpotifyTrack]:
-    """Parse `GET /me/tracks`, whose items wrap the track in `added_at`."""
+def parse_track_items(payload: dict | None) -> list[SpotifyTrack]:
+    """Parse a page whose items wrap the track: /me/tracks and playlist items."""
     items = (payload or {}).get("items") or []
     tracks = []
     for item in items:
         if not isinstance(item, dict):
             continue
         track = parse_track(item.get("track"))
+        if track is not None:
+            tracks.append(track)
+    return tracks
+
+
+#: `GET /me/tracks` wraps each track in `added_at`; playlist items do the same.
+parse_saved_tracks = parse_track_items
+
+
+def parse_album_tracks(payload: dict | None, album: dict | None = None) -> list[SpotifyTrack]:
+    """Parse `GET /albums/{id}/tracks`.
+
+    Album tracks are the one listing that arrives unwrapped and stripped: no
+    album name and no images, because the caller already asked for the album.
+    Both are put back from `album` so a picker can show cover art.
+    """
+    album = album or {}
+    context = {
+        "name": album.get("name"),
+        "images": album.get("images"),
+        "album_type": album.get("album_type"),
+    }
+
+    tracks = []
+    for item in (payload or {}).get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        track = parse_track({**item, "album": context})
+        if track is not None:
+            tracks.append(track)
+    return tracks
+
+
+def parse_queue(payload: dict | None) -> list[SpotifyTrack]:
+    """Parse `GET /me/player/queue`: what is playing, then what follows it."""
+    payload = payload or {}
+    entries = [payload.get("currently_playing"), *(payload.get("queue") or [])]
+
+    tracks = []
+    for entry in entries:
+        track = parse_track(entry)
         if track is not None:
             tracks.append(track)
     return tracks

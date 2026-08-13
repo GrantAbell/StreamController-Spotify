@@ -20,6 +20,7 @@ from spotify_essentials.spotify.errors import (
     SpotifyNetworkError,
     SpotifyNoDeviceError,
     SpotifyRateLimitError,
+    SpotifyRestrictedError,
 )
 from spotify_essentials.spotify.manager import SpotifyManager
 from spotify_essentials.spotify.state import ActionStatus, LikeState
@@ -39,6 +40,8 @@ VOLUME_PATH = "/me/player/volume"
 SEEK_PATH = "/me/player/seek"
 LIBRARY_PATH = "/me/library"
 CONTAINS_PATH = "/me/library/contains"
+#: Liked Songs as a browsable context, which is all it is to a picker now.
+LIKED = "spotify:collection:tracks"
 
 
 @pytest.fixture
@@ -197,6 +200,73 @@ def test_external_changes_are_picked_up_without_any_input(manager):
     state = manager.get_playback_state()
     assert state.shuffle is True
     assert state.repeat_mode == "track"
+
+
+def test_smart_shuffle_turned_on_elsewhere_reaches_the_key(manager):
+    # Smart shuffle can only be switched on in Spotify itself, so arriving from
+    # outside is the only way a key ever sees it.
+    poll(manager)
+    shown = []
+    manager.add_listener(lambda: shown.append(manager.get_playback_state()), {"playback"})
+
+    manager.api.playback["shuffle_state"] = True
+    manager.api.playback["smart_shuffle"] = True
+    poll(manager)
+
+    assert [state.is_smart_shuffle for state in shown] == [True]
+
+
+def test_smart_shuffle_switched_off_elsewhere_also_redraws(manager):
+    manager.api.playback["shuffle_state"] = True
+    manager.api.playback["smart_shuffle"] = True
+    poll(manager)
+    shown = []
+    manager.add_listener(lambda: shown.append(manager.get_playback_state()), {"playback"})
+
+    # Back to ordinary shuffle: `shuffle_state` never moved, so only the smart
+    # field distinguishes the two pictures.
+    manager.api.playback["smart_shuffle"] = False
+    poll(manager)
+
+    assert [state.is_smart_shuffle for state in shown] == [False]
+
+
+def test_pressing_shuffle_while_smart_turns_shuffle_off(manager):
+    manager.api.playback["shuffle_state"] = True
+    manager.api.playback["smart_shuffle"] = True
+    poll(manager)
+
+    manager.toggle_shuffle()
+    drain(manager)
+
+    assert manager.api.calls_to("/me/player/shuffle")[-1].detail["state"] is False
+
+
+def test_turning_shuffle_off_stops_showing_smart_at_once(manager):
+    manager.api.playback["shuffle_state"] = True
+    manager.api.playback["smart_shuffle"] = True
+    poll(manager)
+    assert manager.get_playback_state().is_smart_shuffle
+
+    manager.set_shuffle(False)
+    # Nothing has been sent yet, and the key must not still be claiming SMART.
+    assert manager.api.calls_to("/me/player/shuffle") == []
+    assert manager.get_playback_state().is_smart_shuffle is False
+
+
+def test_a_refused_shuffle_off_goes_back_to_showing_smart(manager):
+    # Spotify decides for itself what happens to smart shuffle when shuffle is
+    # switched off; if it keeps it, the key has to admit that.
+    manager.api.playback["shuffle_state"] = True
+    manager.api.playback["smart_shuffle"] = True
+    poll(manager)
+
+    manager.set_shuffle(False)
+    manager._optimistic["shuffle"] = (False, time.monotonic() - 0.01)
+    manager.api.playback["shuffle_state"] = True
+    poll(manager)
+
+    assert manager.get_playback_state().is_smart_shuffle is True
 
 
 # -- optimistic state ------------------------------------------------------
@@ -472,44 +542,253 @@ def test_refreshing_playlists_reloads_them(manager):
 def test_liked_songs_load_one_page_at_a_time(manager):
     manager.api.saved_tracks = saved_track_payloads(5000)
 
-    manager.ensure_liked_songs(0)
+    manager.ensure_context_tracks(LIKED, 0)
     drain(manager)
 
-    assert manager.get_liked_songs_total() == 5000
-    assert manager.get_liked_song(0).name == "Song 0"
-    assert manager.get_liked_song(4999) is None, "a library of 5000 must not be downloaded up front"
+    assert manager.get_context_track_total(LIKED) == 5000
+    assert manager.get_context_track(LIKED, 0).name == "Song 0"
+    assert manager.get_context_track(LIKED, 4999) is None, "a library of 5000 must not be downloaded up front"
     assert len(manager.api.calls_to("/me/tracks")) == 1
 
 
 def test_liked_songs_prefetch_the_next_page_near_the_boundary(manager):
     manager.api.saved_tracks = saved_track_payloads(200)
-    manager.ensure_liked_songs(0)
+    manager.ensure_context_tracks(LIKED, 0)
     drain(manager)
 
-    manager.ensure_liked_songs(45)
+    manager.ensure_context_tracks(LIKED, 45)
     drain(manager)
 
-    assert manager.get_liked_song(55).name == "Song 55"
+    assert manager.get_context_track(LIKED, 55).name == "Song 55"
     assert len(manager.api.calls_to("/me/tracks")) == 2
 
 
-def test_an_empty_library_is_reported_as_empty(manager):
-    manager.ensure_liked_songs(0)
+def test_a_captured_context_plays_the_selected_song_inside_it(manager):
+    # What the Liked Songs dial does once the real context has been captured:
+    # Spotify's own collection, starting on the song the dial is showing.
+    poll(manager)
+
+    manager.play_context_at("spotify:playlist:liked", "spotify:track:4cOdK2wGLETKBW3PvgPWqT")
     drain(manager)
-    assert manager.get_liked_songs_total() == 0
+
+    call = manager.api.calls_to("/me/player/play")[0]
+    assert call.detail["context_uri"] == "spotify:playlist:liked"
+    assert call.detail["offset"] == {"uri": "spotify:track:4cOdK2wGLETKBW3PvgPWqT"}
+    assert call.detail["uris"] is None, "a context plays on past the song, a uris list does not"
+
+
+def test_a_captured_context_can_be_played_from_the_top(manager):
+    poll(manager)
+
+    manager.play_context_at("spotify:playlist:liked")
+    drain(manager)
+
+    assert manager.api.calls_to("/me/player/play")[0].detail["offset"] is None
+
+
+def test_junk_is_never_sent_as_a_context(manager):
+    poll(manager)
+
+    manager.play_context_at("not a spotify link", "spotify:track:t1")
+    drain(manager)
+
+    assert manager.api.calls_to("/me/player/play") == []
+
+
+def test_playing_a_liked_song_carries_the_rest_of_the_library_with_it(manager):
+    # Spotify has no context URI for Liked Songs, so the run is listed out;
+    # playing one song must not leave the deck on a one-song queue.
+    manager.api.saved_tracks = saved_track_payloads(200)
+    manager.ensure_context_tracks(LIKED, 0)
+    drain(manager)
+
+    manager.play_run_from(LIKED, 3)
+    drain(manager)
+
+    call = manager.api.calls_to("/me/player/play")[0]
+    uris = call.detail["uris"]
+    assert uris[0] == "spotify:track:track0003", "the selected song plays first"
+    assert uris[1:4] == [f"spotify:track:track{n:04d}" for n in (4, 5, 6)], "in browsing order"
+    assert len(uris) == 50
+    assert call.detail["context_uri"] is None
+
+
+def test_a_liked_run_already_browsed_costs_no_extra_request(manager):
+    manager.api.saved_tracks = saved_track_payloads(200)
+    manager.ensure_context_tracks(LIKED, 0)
+    drain(manager)
+    before = len(manager.api.calls_to("/me/tracks"))
+
+    manager.play_run_from(LIKED, 0)
+    drain(manager)
+
+    assert len(manager.api.calls_to("/me/tracks")) == before
+
+
+def test_a_liked_run_past_the_cache_is_fetched(manager):
+    manager.api.saved_tracks = saved_track_payloads(200)
+    manager.ensure_context_tracks(LIKED, 0)
+    drain(manager)
+
+    manager.play_run_from(LIKED, 120)
+    drain(manager)
+
+    assert manager.api.calls_to("/me/player/play")[0].detail["uris"][0] == "spotify:track:track0120"
+
+
+def test_a_liked_run_stops_at_the_end_of_the_library(manager):
+    manager.api.saved_tracks = saved_track_payloads(12)
+    manager.ensure_context_tracks(LIKED, 0)
+    drain(manager)
+
+    manager.play_run_from(LIKED, 9)
+    drain(manager)
+
+    uris = manager.api.calls_to("/me/player/play")[0].detail["uris"]
+    assert uris == [f"spotify:track:track{n:04d}" for n in (9, 10, 11)]
+
+
+# -- browsing any context (the Song Picker) --------------------------------
+
+
+PLAYLIST = "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M"
+ALBUM = "spotify:album:1DFixLWuPkv3KT3TnV35m3"
+
+
+def test_a_playlist_is_browsed_a_page_at_a_time(manager):
+    manager.api.context_tracks = saved_track_payloads(120)
+
+    manager.ensure_context_tracks(PLAYLIST, 0)
+    drain(manager)
+
+    assert manager.get_context_track_total(PLAYLIST) == 120
+    assert manager.get_context_track(PLAYLIST, 0).name == "Song 0"
+    assert manager.get_context_track(PLAYLIST, 119) is None, "only the first page should have been read"
+
+
+def test_album_tracks_take_their_cover_from_the_album(manager):
+    # An album listing gives bare tracks: no album, no images. Without the
+    # context's own cover a picker would draw a placeholder for every song.
+    manager.api.context_tracks = saved_track_payloads(4)
+    manager.ensure_context_details(ALBUM)
+    manager.ensure_context_tracks(ALBUM, 0)
+    drain(manager)
+
+    track = manager.get_context_track(ALBUM, 0)
+    assert track.name == "Song 0"
+    assert track.artwork_url == "https://i.example/context.jpg"
+
+
+def test_a_browsed_context_is_not_re_requested(manager):
+    manager.api.context_tracks = saved_track_payloads(60)
+
+    for _ in range(4):
+        manager.ensure_context_tracks(PLAYLIST, 0)
+        drain(manager)
+
+    assert len(manager.api.calls_to(Endpoints.playlist_items("37i9dQZF1DXcBWIGoYBM5M"))) == 1
+
+
+def test_something_with_no_song_list_is_never_asked_for(manager):
+    # An artist has no track listing and a bare track is not a collection.
+    manager.ensure_context_tracks("spotify:artist:0TnOYISbd1XYRBk9myaseg", 0)
+    manager.ensure_context_tracks("spotify:track:4cOdK2wGLETKBW3PvgPWqT", 0)
+
+    assert drain(manager) == 0
+
+
+# -- browsing the queue (the Queue Picker) ---------------------------------
+
+
+def test_the_queue_is_what_is_playing_and_what_follows(manager):
+    manager.api.queue = [track_payload(track_id="now", name="Now"), track_payload(track_id="next", name="Next")]
+
+    manager.ensure_queue()
+    drain(manager)
+
+    assert [track.name for track in manager.get_queue_tracks()] == ["Now", "Next"]
+
+
+def test_the_queue_is_read_once_until_something_changes(manager):
+    manager.api.queue = [track_payload(track_id="now", name="Now")]
+    manager.ensure_queue()
+    drain(manager)
+
+    manager.ensure_queue()
+    assert drain(manager) == 0
+    assert len(manager.api.calls_to(Endpoints.PLAYER_QUEUE)) == 1
+
+
+def test_the_queue_is_re_read_when_the_song_changes(manager):
+    # Nothing polls the queue, so a track change is what keeps it honest.
+    manager.api.queue = [track_payload(track_id="now", name="Now")]
+    manager.ensure_queue()
+    settle(manager)
+    before = len(manager.api.calls_to(Endpoints.PLAYER_QUEUE))
+
+    manager.api.playback["item"] = track_payload(track_id="other", name="Something Else")
+    settle(manager)
+
+    assert len(manager.api.calls_to(Endpoints.PLAYER_QUEUE)) == before + 1
+
+
+def test_the_queue_is_left_alone_when_no_picker_is_showing_it(manager):
+    # The queue costs a request of its own, so it is only kept fresh for a
+    # dial that has actually asked for it.
+    settle(manager)
+    manager.api.playback["item"] = track_payload(track_id="other", name="Something Else")
+    settle(manager)
+
+    assert manager.api.calls_to(Endpoints.PLAYER_QUEUE) == []
+
+
+def test_playing_further_down_the_queue_skips_what_is_between(manager):
+    # What the app does when you play something further down: it consumes the
+    # songs in between, which keeps the context and everything past the twenty.
+    manager.skip_to_queue_index(3)
+    drain(manager)
+
+    assert len(manager.api.calls_to("/me/player/next")) == 3
+    assert manager.api.calls_to("/me/player/play") == [], "jumping is skipping, not a new queue"
+
+
+def test_skipping_to_the_song_already_playing_does_nothing(manager):
+    manager.skip_to_queue_index(0)
+
+    assert drain(manager) == 0
+    assert manager.api.calls_to("/me/player/next") == []
+
+
+def test_playing_out_of_the_queue_keeps_what_was_behind_it(manager):
+    tracks = [track_payload(track_id=f"q{n}", name=f"Q{n}") for n in range(4)]
+
+    manager.play_tracks([track["uri"] for track in tracks[1:]])
+    drain(manager)
+
+    assert manager.api.calls_to("/me/player/play")[0].detail["uris"] == [
+        "spotify:track:q1",
+        "spotify:track:q2",
+        "spotify:track:q3",
+    ]
+
+
+def test_an_empty_library_is_reported_as_empty(manager):
+    manager.ensure_context_tracks(LIKED, 0)
+    drain(manager)
+    assert manager.get_context_track_total(LIKED) == 0
 
 
 def test_a_failed_page_can_be_retried(manager):
     manager.api.saved_tracks = saved_track_payloads(60)
     manager.api.raise_next = SpotifyNetworkError()
 
-    manager.ensure_liked_songs(0)
+    manager.ensure_context_tracks(LIKED, 0)
     drain(manager)
-    assert manager.get_liked_songs_total() is None
+    assert manager.get_context_track_total(LIKED) is None
 
-    manager.ensure_liked_songs(0)
+    manager.ensure_context_tracks(LIKED, 0)
     drain(manager)
-    assert manager.get_liked_songs_total() == 60
+    assert manager.get_context_track_total(LIKED) == 60
 
 
 # -- devices ---------------------------------------------------------------
@@ -798,6 +1077,53 @@ def test_playing_a_playlist_wakes_an_idle_device(manager):
     assert call.detail["device_id"] == "device-1"
 
 
+# -- the queue -------------------------------------------------------------
+
+
+def test_queueing_a_song_reports_success(manager):
+    poll(manager)
+    results = []
+
+    manager.add_to_queue("spotify:track:t9", on_result=results.append)
+    drain(manager)
+
+    assert manager.api.queued == ["spotify:track:t9"]
+    assert results == [True]
+    # Queueing must not disturb what is playing.
+    assert manager.api.calls_to("/me/player/play") == []
+
+
+def test_queueing_goes_to_the_configured_device(manager):
+    _idle(manager)
+
+    manager.add_to_queue("spotify:track:t9", "device-1")
+    drain(manager)
+
+    assert manager.api.calls_to(Endpoints.PLAYER_QUEUE)[0].detail["device_id"] == "device-1"
+
+
+def test_a_refused_queue_is_reported_as_a_failure(manager):
+    # settle() so the lookups a first poll queues cannot swallow the failure.
+    settle(manager)
+    manager.api.raise_next = SpotifyNoDeviceError()
+    results = []
+
+    manager.add_to_queue("spotify:track:t9", on_result=results.append)
+    drain(manager)
+
+    assert results == [False], "the key has to be able to show that it did not work"
+
+
+def test_queueing_nothing_fails_without_a_request(manager):
+    results = []
+
+    manager.add_to_queue("", on_result=results.append)
+    drain(manager)
+
+    assert results == [False]
+    assert manager.api.calls_to(Endpoints.PLAYER_QUEUE) == []
+
+
 # -- opening links ---------------------------------------------------------
 
 
@@ -904,14 +1230,35 @@ def test_navigating_parks_playback_and_puts_it_back(manager):
     assert resumed.detail["device_id"] == restore["device_id"]
 
 
-def test_navigating_leaves_a_paused_player_paused(manager):
+def test_a_paused_player_is_never_asked_to_pause_again(manager):
+    # Spotify answers a pointless pause with 403 "Restriction violated", and
+    # that used to abort the navigation: the app came forward showing nothing.
     manager.navigate_settle_seconds = 0
     manager.api.playback["is_playing"] = False
+    manager.api.playback["actions"] = {"disallows": {"pausing": True}}
     poll(manager)
 
     manager._navigate_around_playback(lambda: None, manager._restore_point())
 
-    assert manager.api.paths()[-3:] == ["/me/player/pause", "/me/player/play", "/me/player/pause"]
+    assert manager.api.paths()[-2:] == ["/me/player/play", "/me/player/pause"]
+    assert len(manager.api.calls_to("/me/player/pause")) == 1, "only the one that puts it back as it was"
+
+
+def test_a_refused_pause_does_not_stop_the_navigation(manager):
+    # Whatever Spotify thinks of the pause, the item still has to open.
+    manager.navigate_settle_seconds = 0
+    poll(manager)
+
+    def refuse(device_id=None):
+        raise SpotifyRestrictedError("Player command failed: Restriction violated")
+
+    manager.api.pause = refuse
+    navigated = []
+
+    manager._navigate_around_playback(lambda: navigated.append("open"), manager._restore_point())
+
+    assert navigated == ["open"], "the open must survive a refused pause"
+    assert manager.api.calls_to("/me/player/play"), "and playback still gets put back"
 
 
 def test_playback_comes_back_even_if_the_navigation_fails(manager):

@@ -80,7 +80,7 @@ class ModeStackAction(SpotifyActionBase):
 
     def state_signature(self):
         state = self.manager.get_playback_state()
-        return (self.blocking_status(), state.shuffle, state.repeat_mode)
+        return (self.blocking_status(), state.shuffle, state.is_smart_shuffle, state.repeat_mode)
 
     def render_image(self):
         status = self.blocking_status()
@@ -88,4 +88,9 @@ class ModeStackAction(SpotifyActionBase):
             return self.render_status(status)
 
         state = self.manager.get_playback_state()
-        return render_mode_stack_key(self.image_size(), shuffle=state.shuffle, repeat_mode=state.repeat_mode)
+        return render_mode_stack_key(
+            self.image_size(),
+            shuffle=state.shuffle,
+            repeat_mode=state.repeat_mode,
+            smart_shuffle=state.is_smart_shuffle,
+        )

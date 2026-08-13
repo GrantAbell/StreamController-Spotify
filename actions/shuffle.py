@@ -1,7 +1,11 @@
 """Spotify: Shuffle.
 
-Three visual states, not two: on, off, and "Spotify has not told us yet", which
-is what an unknown state honestly is before the first poll answers.
+Four visual states, not two: off, on, smart, and "Spotify has not told us yet",
+which is what an unknown state honestly is before the first poll answers.
+
+Smart shuffle is shown but cannot be switched on: Spotify's Web API takes a
+boolean for shuffle and offers no way to ask for the smart kind. Pressing the
+key therefore turns shuffle off, exactly as it does when plain shuffle is on.
 """
 
 from __future__ import annotations
@@ -33,23 +37,28 @@ class ShuffleAction(SpotifyActionBase):
         self.manager.toggle_shuffle(self.device_id)
 
     def state_signature(self):
-        return (self.blocking_status(), self.manager.get_playback_state().shuffle)
+        state = self.manager.get_playback_state()
+        return (self.blocking_status(), state.shuffle, state.is_smart_shuffle)
 
     def render_image(self):
         status = self.blocking_status()
         if status is not None:
             return self.render_status(status)
 
-        shuffle = self.manager.get_playback_state().shuffle
+        state = self.manager.get_playback_state()
+        shuffle = state.shuffle
+        smart = state.is_smart_shuffle
 
-        if shuffle is None:
+        if shuffle is None and not smart:
             return self.render_status(ActionStatus.UNKNOWN, detail="SHUFFLE")
+
+        on = smart or bool(shuffle)
 
         return render_glyph_key(
             self.image_size(),
-            "shuffle",
-            color=theme.SPOTIFY_GREEN if shuffle else theme.WHITE,
-            caption="ON" if shuffle else "OFF",
-            active=bool(shuffle),
-            dim=not shuffle,
+            "smart_shuffle" if smart else "shuffle",
+            color=theme.SPOTIFY_GREEN if on else theme.WHITE,
+            caption="SMART" if smart else ("ON" if on else "OFF"),
+            active=on,
+            dim=not on,
         )

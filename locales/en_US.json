@@ -28,5 +28,6 @@
     "actions.playback-dial.name": "Spotify: Playback Control",
     "actions.volume-dial.name": "Spotify: Volume Control",
     "actions.playlists-dial.name": "Spotify: My Playlists",
-    "actions.liked-songs-dial.name": "Spotify: My Liked Songs"
+    "actions.queue-picker.name": "Spotify: Queue Picker",
+    "actions.song-picker.name": "Spotify: Song Picker"
 }

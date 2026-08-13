@@ -62,6 +62,23 @@ _REPEAT_LOOP = [
     poly([(9.5, 14.4), (5.5, 17.5), (9.5, 20.6)]),
 ]
 
+def _SPARKLE(cx: float, cy: float, radius: float) -> dict:  # noqa: N802 - a shape, like the constants around it
+    """A four-pointed star with concave sides, drawn as one filled polygon."""
+    waist = radius * 0.28
+    return poly(
+        [
+            (cx, cy - radius),
+            (cx + waist, cy - waist),
+            (cx + radius, cy),
+            (cx + waist, cy + waist),
+            (cx, cy + radius),
+            (cx - waist, cy + waist),
+            (cx - radius, cy),
+            (cx - waist, cy - waist),
+        ]
+    )
+
+
 _MUSIC_NOTE = [
     dot(9.4, 16.6, 2.7),
     line(12.1, 16.6, 12.1, 6.4, w=0.9),
@@ -100,6 +117,16 @@ ICONS: dict[str, list[dict]] = {
         polyline([(3.5, 16.5), (8.0, 16.5), (15.5, 7.5), (18.0, 7.5)], w=0.95),
         poly([(17.0, 4.6), (21.0, 7.5), (17.0, 10.4)]),
         poly([(17.0, 13.6), (21.0, 16.5), (17.0, 19.4)]),
+    ],
+    # Spotify's own smart shuffle mark is the shuffle arrows plus sparkles, so
+    # the same shape is reused a size down to leave the corner free for them.
+    "smart_shuffle": [
+        polyline([(5.6, 9.3), (9.5, 9.3), (15.9, 17.1), (18.1, 17.1)], w=0.95),
+        polyline([(5.6, 17.1), (9.5, 17.1), (15.9, 9.3), (18.1, 9.3)], w=0.95),
+        poly([(17.2, 6.8), (20.6, 9.3), (17.2, 11.8)]),
+        poly([(17.2, 14.6), (20.6, 17.1), (17.2, 19.6)]),
+        _SPARKLE(5.4, 4.6, 3.0),
+        _SPARKLE(10.9, 2.9, 1.7),
     ],
     "repeat_context": list(_REPEAT_LOOP),
     "repeat_track": _REPEAT_LOOP
@@ -228,6 +255,24 @@ ICONS: dict[str, list[dict]] = {
         dot(10.0, 15.4, 2.1),
         line(12.1, 15.4, 12.1, 8.4, w=0.75),
         poly([(12.1, 8.2), (16.4, 7.0), (16.4, 9.4), (12.1, 10.6)]),
+    ],
+    # A list with the playhead beside its first row: what is queued, in order.
+    "queue_dial": [
+        _RING,
+        poly([(6.6, 7.4), (9.4, 9.3), (6.6, 11.2)]),
+        line(11.0, 9.3, 17.0, 9.3, w=0.8),
+        line(7.0, 13.2, 17.0, 13.2, w=0.8),
+        line(7.0, 16.4, 13.6, 16.4, w=0.8),
+    ],
+    # A list with a note picked out of it: one song chosen from a collection.
+    "song_picker_dial": [
+        _RING,
+        line(6.6, 8.6, 13.4, 8.6, w=0.8),
+        line(6.6, 11.8, 11.4, 11.8, w=0.8),
+        line(6.6, 15.0, 10.4, 15.0, w=0.8),
+        dot(13.6, 16.0, 1.7),
+        line(15.3, 16.0, 15.3, 10.2, w=0.7),
+        poly([(15.3, 10.0), (18.4, 9.1), (18.4, 11.0), (15.3, 11.9)]),
     ],
     # status
     "no_device": [

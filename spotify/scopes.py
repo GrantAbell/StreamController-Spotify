@@ -10,7 +10,7 @@ from __future__ import annotations
 #: scope -> the feature that would break without it
 SCOPE_REASONS: dict[str, str] = {
     "user-read-playback-state": "Read what is playing, and which devices exist",
-    "user-modify-playback-state": "Play, pause, skip, seek, shuffle, repeat, volume, transfer",
+    "user-modify-playback-state": "Play, pause, skip, seek, shuffle, repeat, volume, queue, transfer",
     "user-library-read": "Show whether the current song is in your Liked Songs",
     "user-library-modify": "Like and unlike the current song",
     "playlist-read-private": "List your playlists, including private ones",

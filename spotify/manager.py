@@ -43,7 +43,10 @@ from .models import (
     parse_playback,
     parse_playlists,
     parse_profile,
+    parse_album_tracks,
+    parse_queue,
     parse_saved_tracks,
+    parse_track_items,
 )
 from .state import (
     FALLBACK_UNMUTE_VOLUME,
@@ -56,7 +59,7 @@ from .state import (
     playback_status,
     seek_target_ms,
 )
-from .uri import open_targets, parse_resource, uri_type
+from .uri import browsable_context, open_targets, parse_resource, uri_type
 
 TOPIC_PLAYBACK = "playback"
 TOPIC_AUTH = "auth"
@@ -64,6 +67,8 @@ TOPIC_DEVICES = "devices"
 TOPIC_PLAYLISTS = "playlists"
 TOPIC_LIKED = "liked"
 TOPIC_LIBRARY = "library"
+#: Lists a picker dial browses: the play queue, and any context's tracks.
+TOPIC_BROWSE = "browse"
 
 DEFAULT_TOPICS = frozenset({TOPIC_PLAYBACK, TOPIC_AUTH, TOPIC_LIBRARY})
 
@@ -79,6 +84,16 @@ IDLE_POLL_MULTIPLIER = 4
 #: How long to leave `/me` alone after it failed, so a broken grant does not
 #: turn into a request per poll.
 PROFILE_RETRY_SECONDS = 60.0
+
+#: How much of the queue Spotify will show: the song playing plus the next
+#: twenty. The endpoint takes no limit or offset — measured, not assumed — so
+#: this is a ceiling rather than a page size.
+QUEUE_LIMIT = 20
+
+#: How many songs are sent when a picker plays from a context Spotify will not
+#: start on its own — Liked Songs, most of all. The run has to be listed out, so
+#: one page is one request and several hours of listening.
+RUN_LENGTH = MAX_PAGE_SIZE
 
 #: The running Spotify desktop client. Reaching it here rather than through its
 #: command line is what keeps "open this" from disturbing what it is playing.
@@ -134,7 +149,11 @@ class SpotifyManager:
         self._playlists_loading = False
         self._profile_loading = False
         self._profile_retry_after = 0.0
-        self._liked: PagedCache[SpotifyTrack] = PagedCache(page_size=MAX_PAGE_SIZE)
+        #: One paged cache per context a picker is browsing, keyed by URI.
+        #: Liked Songs is not special here: it is `spotify:collection:tracks`.
+        self._context_tracks: dict[str, PagedCache[SpotifyTrack]] = {}
+        self._queue_tracks: list[SpotifyTrack] | None = None
+        self._queue_loading = False
 
         self._like_state: TtlCache[str, bool] = TtlCache(ttl_seconds=900.0)
         self._like_pending: set[str] = set()
@@ -154,7 +173,15 @@ class SpotifyManager:
 
         self._listeners: dict[str, set[Callable[[], None]]] = {
             topic: set()
-            for topic in (TOPIC_PLAYBACK, TOPIC_AUTH, TOPIC_DEVICES, TOPIC_PLAYLISTS, TOPIC_LIKED, TOPIC_LIBRARY)
+            for topic in (
+                TOPIC_PLAYBACK,
+                TOPIC_AUTH,
+                TOPIC_DEVICES,
+                TOPIC_PLAYLISTS,
+                TOPIC_LIKED,
+                TOPIC_LIBRARY,
+                TOPIC_BROWSE,
+            )
         }
 
         self._queue = CommandQueue()
@@ -296,7 +323,8 @@ class SpotifyManager:
                 self._playlists = None
                 self._optimistic.clear()
                 self._like_state.clear()
-                self._liked.clear()
+                self._context_tracks.clear()
+                self._queue_tracks = None
         self._notify(TOPIC_AUTH, TOPIC_PLAYBACK, TOPIC_DEVICES, TOPIC_PLAYLISTS, TOPIC_LIKED, TOPIC_LIBRARY)
 
     def _on_artwork_loaded(self, _url: str) -> None:
@@ -362,6 +390,12 @@ class SpotifyManager:
             replacements["is_playing"] = bool(overrides["is_playing"])
         if "shuffle" in overrides:
             replacements["shuffle"] = bool(overrides["shuffle"])
+            # Smart shuffle is a kind of shuffle, so it cannot survive shuffle
+            # being turned off. Spotify may disagree when it answers — it takes
+            # a plain boolean and decides for itself what happens to the smart
+            # part — and the reconcile puts the key back if it does.
+            if not replacements["shuffle"]:
+                replacements["smart_shuffle"] = False
         if "repeat_mode" in overrides:
             replacements["repeat_mode"] = overrides["repeat_mode"]
         if "volume_percent" in overrides:
@@ -677,6 +711,14 @@ class SpotifyManager:
         if self.marquee is not None:
             self.marquee.reset_all()
 
+        # The queue has moved on by one; refresh it, but only for a picker that
+        # is actually showing it — this is the one thing that keeps the queue
+        # current without polling it every second.
+        with self._lock:
+            queue_in_use = self._queue_tracks is not None
+        if queue_in_use:
+            self.refresh_queue()
+
         if track is None or not is_music_track(state):
             self._notify(TOPIC_LIBRARY)
             return
@@ -793,8 +835,11 @@ class SpotifyManager:
         self.submit(lambda: self._run_playback(lambda: self.api.set_shuffle(bool(enabled), device_id=self._send_to(device_id))))
 
     def toggle_shuffle(self, device_id: str | None = None) -> None:
-        current = self.get_playback_state().shuffle
-        self.set_shuffle(not bool(current), device_id=device_id)
+        state = self.get_playback_state()
+        # Smart shuffle counts as on: a key showing SMART has to turn shuffle
+        # off when pressed, whatever `shuffle_state` says alongside it.
+        current = bool(state.shuffle) or state.is_smart_shuffle
+        self.set_shuffle(not current, device_id=device_id)
 
     def set_repeat(self, mode: str, device_id: str | None = None) -> None:
         self._set_optimistic("repeat_mode", mode)
@@ -1019,43 +1064,106 @@ class SpotifyManager:
                 self._playlists_loading = False
             self._notify(TOPIC_PLAYLISTS)
 
-    # -- liked songs ------------------------------------------------------
+    # -- browsing a context -----------------------------------------------
 
-    @property
-    def liked_songs(self) -> PagedCache[SpotifyTrack]:
-        return self._liked
+    def _context_cache(self, context_uri: str) -> PagedCache:
+        with self._lock:
+            cache = self._context_tracks.get(context_uri)
+            if cache is None:
+                cache = PagedCache(page_size=MAX_PAGE_SIZE)
+                self._context_tracks[context_uri] = cache
+            return cache
 
-    def get_liked_song(self, index: int) -> SpotifyTrack | None:
-        return self._liked.get(index)
+    def get_context_track(self, context_uri: str | None, index: int) -> SpotifyTrack | None:
+        return self._context_cache(context_uri).get(index) if context_uri else None
 
-    def get_liked_songs_total(self) -> int | None:
-        return self._liked.total
+    def get_context_track_total(self, context_uri: str | None) -> int | None:
+        return self._context_cache(context_uri).total if context_uri else None
 
-    def ensure_liked_songs(self, index: int = 0) -> None:
-        """Make sure the page containing `index` (and the next one) is loading."""
-        if not self.auth.is_authenticated:
+    def ensure_context_tracks(self, context_uri: str | None, index: int = 0) -> None:
+        """Make sure the page containing `index` is loading, for any context."""
+        if not context_uri or not self.auth.is_authenticated:
+            return
+        if not browsable_context(context_uri):
             return
 
-        for offset in self._liked.missing_offsets(index):
-            self._liked.mark_requested(offset)
-            self.submit(lambda captured=offset: self._load_liked_page(captured), coalesce_key=f"liked:{offset}")
+        cache = self._context_cache(context_uri)
+        for offset in cache.missing_offsets(index):
+            cache.mark_requested(offset)
+            self.submit(
+                lambda uri=context_uri, captured=offset: self._load_context_page(uri, captured),
+                coalesce_key=f"tracks:{context_uri}:{offset}",
+            )
 
-    def _load_liked_page(self, offset: int) -> None:
+    def refresh_context_tracks(self, context_uri: str | None) -> None:
+        if not context_uri:
+            return
+        self._context_cache(context_uri).clear()
+        self._notify(TOPIC_BROWSE)
+        self.ensure_context_tracks(context_uri, 0)
+
+    def _load_context_page(self, context_uri: str, offset: int) -> None:
+        cache = self._context_cache(context_uri)
+        resource = parse_resource(context_uri)
+        if resource is None:
+            return
+
         try:
-            payload = self.api.get_saved_tracks(limit=MAX_PAGE_SIZE, offset=offset)
-            tracks = parse_saved_tracks(payload)
-            self._liked.apply_page(offset, tracks, payload.get("total"))
-            self._notify(TOPIC_LIKED)
+            if resource.resource_type == "collection":
+                # Liked Songs, which has its own endpoint rather than a listing.
+                payload = self.api.get_saved_tracks(limit=MAX_PAGE_SIZE, offset=offset)
+                tracks = parse_saved_tracks(payload)
+            elif resource.resource_type == "album":
+                payload = self.api.get_album_tracks(resource.resource_id, limit=MAX_PAGE_SIZE, offset=offset)
+                # Album tracks arrive without the album on them, so the cover
+                # this picker draws comes from the context it is browsing.
+                details = self._context_details.get(context_uri) or {}
+                cover = details.get("image_url")
+                album = {
+                    "name": details.get("name"),
+                    "images": [{"url": cover, "width": 300}] if cover else None,
+                }
+                tracks = parse_album_tracks(payload, album)
+            else:
+                payload = self.api.get_playlist_items(resource.resource_id, limit=MAX_PAGE_SIZE, offset=offset)
+                tracks = parse_track_items(payload)
+
+            cache.apply_page(offset, tracks, payload.get("total"))
+            self._notify(TOPIC_BROWSE)
         except SpotifyPluginError:
-            # Allow a retry on the next navigation rather than leaving a
-            # permanent hole in the collection.
-            self._liked.unmark_requested(offset)
+            cache.unmark_requested(offset)
             raise
 
-    def refresh_liked_songs(self) -> None:
-        self._liked.clear()
-        self._notify(TOPIC_LIKED)
-        self.ensure_liked_songs(0)
+    # -- the queue --------------------------------------------------------
+
+    def get_queue_tracks(self) -> list[SpotifyTrack] | None:
+        """What is playing and what follows it, or None until it is loaded."""
+        with self._lock:
+            return list(self._queue_tracks) if self._queue_tracks is not None else None
+
+    def ensure_queue(self) -> None:
+        with self._lock:
+            if self._queue_tracks is not None or self._queue_loading:
+                return
+        self.refresh_queue()
+
+    def refresh_queue(self) -> None:
+        if not self.auth.is_authenticated:
+            return
+        with self._lock:
+            self._queue_loading = True
+        self.submit(self._load_queue, coalesce_key="queue")
+
+    def _load_queue(self) -> None:
+        try:
+            tracks = parse_queue(self.api.get_queue())
+        finally:
+            with self._lock:
+                self._queue_loading = False
+
+        with self._lock:
+            self._queue_tracks = tracks
+        self._notify(TOPIC_BROWSE)
 
     # -- contexts ---------------------------------------------------------
 
@@ -1120,6 +1228,132 @@ class SpotifyManager:
         self._set_optimistic("is_playing", True)
         self._notify(TOPIC_PLAYBACK)
         self.submit(lambda: self._run_playback(lambda: self.api.play(device_id=self._send_to(device_id), uris=[uri])))
+
+    def play_context_at(self, context_uri: str, track_uri: str | None = None, device_id: str | None = None) -> None:
+        """Play a context, starting on one particular item inside it."""
+        resource = parse_resource(context_uri)
+        if resource is None:
+            log.warning("Spotify: not a usable Spotify link")
+            return
+
+        offset = {"uri": track_uri} if track_uri else None
+        self._set_optimistic("is_playing", True)
+        self._notify(TOPIC_PLAYBACK)
+        self.submit(
+            lambda: self._run_playback(
+                lambda: self.api.play(
+                    device_id=self._send_to(device_id),
+                    context_uri=resource.uri,
+                    offset=offset,
+                )
+            )
+        )
+
+    def play_tracks(self, uris: list[str], device_id: str | None = None) -> None:
+        """Play an explicit run of songs, in the order given."""
+        uris = [uri for uri in uris if uri]
+        if not uris:
+            return
+
+        self._set_optimistic("is_playing", True)
+        self._notify(TOPIC_PLAYBACK)
+        self.submit(lambda: self._run_playback(lambda: self.api.play(device_id=self._send_to(device_id), uris=uris)))
+
+    def play_run_from(self, context_uri: str, index: int, device_id: str | None = None) -> None:
+        """Play a song from a context, with the songs after it behind it.
+
+        For contexts Spotify will not start on its own — Liked Songs above all:
+        `spotify:collection:tracks` is answered 204 and then ignored, and
+        `spotify:user:<id>:collection` sets the context but starts nothing. So
+        the run is listed out explicitly, in the order the picker browses it,
+        which is why it is RUN_LENGTH songs rather than an endless context.
+        """
+        self._set_optimistic("is_playing", True)
+        self._notify(TOPIC_PLAYBACK)
+
+        def work():
+            uris = self._run_uris(context_uri, index)
+            if not uris:
+                raise SpotifyApiError(0, "The songs to play could not be read")
+            self._run_playback(lambda: self.api.play(device_id=self._send_to(device_id), uris=uris))
+
+        self.submit(work)
+
+    def _run_uris(self, context_uri: str, index: int, count: int = RUN_LENGTH) -> list[str]:
+        """URIs from `index` on, out of the browsing cache or from Spotify."""
+        start = max(0, index)
+        cache = self._context_cache(context_uri)
+
+        total = cache.total
+        if total is not None:
+            if start >= total:
+                return []
+            count = max(1, min(count, total - start))
+
+        cached = cache.snapshot_range(start, count)
+        if all(track is not None for track in cached):
+            return [track.uri for track in cached if track is not None and track.uri]
+
+        # The browsing cache has not reached this far yet; one page covers the
+        # run, and the same request would have been made by browsing on.
+        resource = parse_resource(context_uri)
+        if resource is None:
+            return []
+        if resource.resource_type == "collection":
+            payload = self.api.get_saved_tracks(limit=count, offset=start)
+            tracks = parse_saved_tracks(payload)
+        elif resource.resource_type == "album":
+            tracks = parse_album_tracks(self.api.get_album_tracks(resource.resource_id, limit=count, offset=start))
+        else:
+            tracks = parse_track_items(self.api.get_playlist_items(resource.resource_id, limit=count, offset=start))
+        return [track.uri for track in tracks if track.uri]
+
+    def skip_to_queue_index(self, index: int, device_id: str | None = None) -> None:
+        """Jump to a position in the queue, dropping the songs in between.
+
+        What the Spotify app does when you play something further down the
+        queue. There is no "skip to position" call, so it is one Next per song
+        passed over — which is exactly what the app is doing too, and it keeps
+        the context and everything past the twenty songs Spotify will show.
+        """
+        steps = max(0, int(index))
+        if steps <= 0:
+            return
+
+        def work():
+            target = self._send_to(device_id)
+            for _ in range(steps):
+                self.api.next_track(device_id=target)
+            self._clear_error()
+            if self.command_settle_seconds:
+                time.sleep(self.command_settle_seconds)
+            self.refresh_queue()
+            self.refresh_now()
+
+        self.submit(work)
+
+    def add_to_queue(self, uri: str, device_id: str | None = None, on_result: Callable[[bool], None] | None = None) -> None:
+        """Queue a track or episode to play after what is on now."""
+        if not uri:
+            if on_result is not None:
+                on_result(False)
+            return
+
+        def work():
+            ok = False
+            try:
+                self.api.add_to_queue(uri, device_id=self._send_to(device_id))
+                self._clear_error()
+                ok = True
+            finally:
+                if on_result is not None:
+                    on_result(ok)
+            with self._lock:
+                queue_in_use = self._queue_tracks is not None
+            if queue_in_use:
+                self.refresh_queue()
+
+        self.submit(work)
 
     def transfer_playback(self, device_id: str, start_playing: bool = False) -> None:
         def work():
@@ -1229,8 +1463,15 @@ class SpotifyManager:
         return True
 
     def _navigate_around_playback(self, navigate: Callable[[], None], restore: dict) -> None:
-        """Navigate with playback parked, then put it back exactly as it was."""
-        self.api.pause(device_id=restore["device_id"])
+        """Navigate with playback parked, then put it back exactly as it was.
+
+        Parking is best-effort. Spotify answers a pause it considers pointless
+        with 403 "Restriction violated" — a player already stopped says so in
+        `disallows` — and that must not be the reason nothing opens.
+        """
+        if restore["can_pause"]:
+            self._try(lambda: self.api.pause(device_id=restore["device_id"]), "park playback")
+
         started = time.monotonic()
         try:
             navigate()
@@ -1239,15 +1480,28 @@ class SpotifyManager:
         finally:
             # However the navigation went, playback has to come back.
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            self.api.play(
-                device_id=restore["device_id"],
-                context_uri=restore["context_uri"],
-                offset={"uri": restore["track_uri"]},
-                position_ms=restore["position_ms"] + elapsed_ms,
+            self._try(
+                lambda: self.api.play(
+                    device_id=restore["device_id"],
+                    context_uri=restore["context_uri"],
+                    offset={"uri": restore["track_uri"]},
+                    position_ms=restore["position_ms"] + elapsed_ms,
+                ),
+                "put playback back",
             )
             if not restore["was_playing"]:
-                self.api.pause(device_id=restore["device_id"])
+                # It was paused before, so leave it paused.
+                self._try(lambda: self.api.pause(device_id=restore["device_id"]), "re-pause playback")
             self.refresh_now()
+
+    def _try(self, call: Callable[[], None], what: str) -> bool:
+        """Run one player command, treating a refusal as a fact rather than a fault."""
+        try:
+            call()
+            return True
+        except SpotifyPluginError as error:
+            debug(f"Spotify: could not {what} ({error})")
+            return False
 
     def _restore_point(self) -> dict | None:
         """What it would take to put playback back exactly where it is now.
@@ -1271,6 +1525,9 @@ class SpotifyManager:
             "track_uri": state.track.uri,
             "position_ms": max(0, interpolated_progress_ms(state) or 0),
             "was_playing": bool(state.is_playing),
+            # Spotify's own word on whether a pause would be accepted: it
+            # refuses one outright when the player has already stopped.
+            "can_pause": bool(state.is_playing) and state.allows("pausing"),
             "device_id": state.device.id if state.device else None,
         }
 
@@ -1331,6 +1588,7 @@ def _has_visible_change(previous: PlaybackState, current: PlaybackState) -> bool
         _track_uri(previous) != _track_uri(current)
         or previous.is_playing != current.is_playing
         or previous.shuffle != current.shuffle
+        or previous.is_smart_shuffle != current.is_smart_shuffle
         or previous.repeat_mode != current.repeat_mode
         or previous.volume_percent != current.volume_percent
         or previous.has_playback != current.has_playback

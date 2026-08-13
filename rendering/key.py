@@ -165,17 +165,20 @@ def render_mode_stack_key(
     *,
     shuffle: bool | None,
     repeat_mode: str | None,
+    smart_shuffle: bool = False,
 ) -> Image.Image:
     """All three playback modes on one key, as three labelled rows.
 
     Showing every mode is the point of this action: the user has to be able to
-    tell what shuffle and repeat are doing without pressing anything.
+    tell what shuffle and repeat are doing without pressing anything. Smart
+    shuffle renames the shuffle row rather than adding a fourth one — it is the
+    same row of Spotify state, and a fourth row would not be readable here.
     """
     width, height = size
     image, draw = new_canvas(size)
 
     rows = (
-        ("SHUFFLE", bool(shuffle), shuffle is None),
+        ("SMART" if smart_shuffle else "SHUFFLE", smart_shuffle or bool(shuffle), shuffle is None),
         ("CONTEXT", repeat_mode == "context", repeat_mode is None),
         ("TRACK", repeat_mode == "track", repeat_mode is None),
     )

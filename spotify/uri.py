@@ -141,6 +141,31 @@ def external_url_for_uri(uri: str) -> str | None:
     return resource.external_url if resource else None
 
 
+#: Types whose tracks can be listed one page at a time, for a picker to browse.
+#: `collection` is Liked Songs, which is listed through its own endpoint.
+BROWSABLE_TYPES = ("playlist", "album", "collection")
+
+
+def playable_context(uri: str | None) -> bool:
+    """Whether `play` will start this as a context and carry on past one song.
+
+    Liked Songs is the one that browses but cannot be started this way, which
+    is why the pickers ask before choosing how to play something.
+    """
+    resource = parse_resource(uri or "")
+    return resource is not None and resource.is_context
+
+
+def browsable_context(uri: str | None) -> bool:
+    """Whether a picker can list this context's songs.
+
+    An artist has no track list of its own and a show holds episodes rather
+    than tracks, so both are rejected here instead of failing per page.
+    """
+    resource = parse_resource(uri or "")
+    return resource is not None and resource.resource_type in BROWSABLE_TYPES
+
+
 def open_targets(url_or_uri: str | None, *, prefer_app: bool = True) -> list[str]:
     """What to hand the desktop, in order, to open something in Spotify.
 

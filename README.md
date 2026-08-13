@@ -4,7 +4,7 @@ Spotify control for [StreamController](https://github.com/StreamController/Strea
 Stream Deck keys **and** Stream Deck+ dials.
 
 Transport, seek, shuffle and repeat, volume and mute, Liked Songs, playlists, device transfer, a one-key
-now-playing **Song Stack**, and four dial actions designed for the Stream Deck+ touchscreen strip rather than
+now-playing **Song Stack**, and five dial actions designed for the Stream Deck+ touchscreen strip rather than
 enlarged from key art.
 
 > **Disclaimer:** This plugin was built with the assistance of AI tools. Review
@@ -43,6 +43,7 @@ Previous and Next change track on a press and seek while held, at a configurable
 **Modes** — Shuffle · Loop Context · Loop Song · Mode Stack
 
 Mode Stack puts all three states on one key and shows them all at once, whatever the press and hold are mapped to.
+Shuffle and Mode Stack both show Spotify's **smart shuffle** as a state of its own rather than as plain shuffle.
 
 **Library** — Like / Unlike · Add to Playlist · Explicit Indicator
 
@@ -60,14 +61,15 @@ configurable short press and hold. Artwork is shown uncropped in its own area, n
 
 **Utility** — Setup · Song Clipboard · Context Information · Transfer Playback · User Information · Play Context
 
-**Stream Deck+ dials** — Playback Control · Volume Control · My Playlists · My Liked Songs
+**Stream Deck+ dials** — Playback Control · Volume Control · My Playlists · Queue Picker · Song Picker
 
 | Dial | Rotate | Press | Tap | Long tap |
 | --- | --- | --- | --- | --- |
 | Playback Control | Previous / Next (hold the dial in to seek instead) | Play / Pause | Play / Pause | Like / Unlike |
 | Volume Control | Volume | Mute while held | Mute / Unmute | — |
 | My Playlists | Browse | Play | Play | Refresh |
-| My Liked Songs | Browse | Play | Play | Refresh |
+| Queue Picker | Browse what is queued | Jump to it | Jump to it | Refresh |
+| Song Picker | Browse what is playing, or a collection you link | Play in context | Play in context | Add to queue |
 
 Every mapping above is a default you can change in the action's settings.
 
@@ -82,6 +84,12 @@ Every mapping above is a default you can change in the action's settings.
 - **External changes show up.** Pause from your phone and the deck follows, without you touching it.
 - **Failures are visible.** No device, rate limited, offline, restricted device, missing playlist and
   authentication problems each say what they are rather than failing silently.
+- **Smart shuffle is shown, not offered.** Spotify reports smart shuffle in the playback state, but its shuffle
+  endpoint takes a plain true/false and has no way to ask for the smart kind. The deck therefore says when smart
+  shuffle is on and can turn shuffle off, but only Spotify itself can turn it on.
+- **The queue is only twenty deep.** Spotify's queue endpoint returns the song playing plus twenty more and
+  takes no paging parameters, so that is the whole of what Queue Picker can show. Song Picker scrolls a whole
+  collection instead.
 
 ## Development
 

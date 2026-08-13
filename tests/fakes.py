@@ -97,13 +97,19 @@ def playback_payload(
     is_playing: bool = True,
     progress_ms: int = 42000,
     shuffle: bool = False,
+    smart_shuffle: bool | None = None,
     repeat: str = "off",
     device: dict | None = None,
     context_uri: str | None = "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M",
 ) -> dict:
     resolved_item = track_payload() if item is UNSET else item
 
+    # `smart_shuffle` is undocumented and simply absent for accounts and clients
+    # that do not have the feature, so None means "no such key", not False.
+    extra = {} if smart_shuffle is None else {"smart_shuffle": smart_shuffle}
+
     return {
+        **extra,
         "device": device if device is not None else device_payload(),
         "repeat_state": repeat,
         "shuffle_state": shuffle,
@@ -132,6 +138,9 @@ class FakeSpotifyApi:
         self.playback = playback if playback is not None else playback_payload()
         self.devices = devices if devices is not None else [device_payload()]
         self.saved_tracks = saved_tracks or []
+        #: Tracks a playlist or album listing returns, and the queue.
+        self.context_tracks: list[dict] = []
+        self.queue: list[dict] = []
         self.playlists = playlists or []
         self.liked = set(liked or ())
         self.profile = profile or {
@@ -143,6 +152,8 @@ class FakeSpotifyApi:
         }
 
         self.calls: list[Call] = []
+        #: URIs handed to add_to_queue, in order.
+        self.queued: list[str] = []
         self.closed = False
         #: Set to an exception instance to make the next call raise it.
         self.raise_next: Exception | None = None
@@ -181,7 +192,15 @@ class FakeSpotifyApi:
         return self.profile
 
     def play(self, device_id=None, context_uri=None, uris=None, position_ms=None, offset=None):
-        self._record("PUT", Endpoints.PLAYER_PLAY, device_id=device_id, context_uri=context_uri, uris=uris)
+        self._record(
+            "PUT",
+            Endpoints.PLAYER_PLAY,
+            device_id=device_id,
+            context_uri=context_uri,
+            uris=uris,
+            offset=offset,
+            position_ms=position_ms,
+        )
         if self.playback:
             self.playback["is_playing"] = True
 
@@ -210,6 +229,10 @@ class FakeSpotifyApi:
         self._record("PUT", Endpoints.PLAYER_SHUFFLE, state=enabled, device_id=device_id)
         if self.playback:
             self.playback["shuffle_state"] = bool(enabled)
+
+    def add_to_queue(self, uri, device_id=None):
+        self._record("POST", Endpoints.PLAYER_QUEUE, uri=uri, device_id=device_id)
+        self.queued.append(uri)
 
     def set_volume(self, percent, device_id=None):
         self._record("PUT", Endpoints.PLAYER_VOLUME, volume_percent=percent, device_id=device_id)
@@ -268,6 +291,28 @@ class FakeSpotifyApi:
 
     def add_to_playlist(self, playlist_id, uris):
         self._record("POST", Endpoints.playlist_items(playlist_id), uris=list(uris))
+
+    def get_playlist_items(self, playlist_id, limit=50, offset=0):
+        self._record("GET", Endpoints.playlist_items(playlist_id), limit=limit, offset=offset)
+        page = self.context_tracks[offset : offset + limit]
+        return {
+            "items": [{"added_at": "2026-01-01T00:00:00Z", "track": track} for track in page],
+            "total": len(self.context_tracks),
+            "limit": limit,
+            "offset": offset,
+        }
+
+    def get_album_tracks(self, album_id, limit=50, offset=0):
+        self._record("GET", Endpoints.album_tracks(album_id), limit=limit, offset=offset)
+        # Album listings are unwrapped and carry no album of their own.
+        page = [{k: v for k, v in track.items() if k != "album"} for track in self.context_tracks[offset : offset + limit]]
+        return {"items": page, "total": len(self.context_tracks), "limit": limit, "offset": offset}
+
+    def get_queue(self):
+        self._record("GET", Endpoints.PLAYER_QUEUE)
+        if not self.queue:
+            return {"currently_playing": None, "queue": []}
+        return {"currently_playing": self.queue[0], "queue": list(self.queue[1:])}
 
     def get_context(self, uri):
         self._record("GET", f"context:{uri}")

@@ -22,7 +22,7 @@ from src.backend.PluginManager.PluginBase import PluginBase
 from src.Signals import Signals
 
 from .actions.add_to_playlist import AddToPlaylistAction
-from .actions.browse_dial import LikedSongsDialAction, PlaylistsDialAction
+from .actions.browse_dial import PlaylistsDialAction, QueuePickerAction, SongPickerAction
 from .actions.context_info import ContextInfoAction
 from .actions.explicit import ExplicitAction
 from .actions.like import LikeAction
@@ -87,7 +87,11 @@ ACTIONS = (
     ("PlaybackDial", PlaybackDialAction, "Spotify: Playback Control", "playback_dial", DIAL_SUPPORT),
     ("VolumeDial", VolumeDialAction, "Spotify: Volume Control", "volume_dial", DIAL_SUPPORT),
     ("PlaylistsDial", PlaylistsDialAction, "Spotify: My Playlists", "playlist_dial", DIAL_SUPPORT),
-    ("LikedSongsDial", LikedSongsDialAction, "Spotify: My Liked Songs", "liked_songs_dial", DIAL_SUPPORT),
+    # The suffix is what StreamController stores on a key, so it stays as it
+    # was when this dial browsed Liked Songs: renaming it would strand every
+    # deck already using one.
+    ("LikedSongsDial", QueuePickerAction, "Spotify: Queue Picker", "queue_dial", DIAL_SUPPORT),
+    ("SongPicker", SongPickerAction, "Spotify: Song Picker", "song_picker_dial", DIAL_SUPPORT),
 )
 
 DEFAULT_PLUGIN_SETTINGS = {

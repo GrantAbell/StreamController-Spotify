@@ -50,6 +50,7 @@ class Endpoints:
     PLAYER_REPEAT = "/me/player/repeat"
     PLAYER_SHUFFLE = "/me/player/shuffle"
     PLAYER_VOLUME = "/me/player/volume"
+    PLAYER_QUEUE = "/me/player/queue"
 
     ME = "/me"
 
@@ -91,6 +92,10 @@ class Endpoints:
     def user(user_id: str) -> str:
         return f"/users/{user_id}"
 
+    @staticmethod
+    def album_tracks(album_id: str) -> str:
+        return f"/albums/{album_id}/tracks"
+
 
 @runtime_checkable
 class SpotifyApiProtocol(Protocol):
@@ -116,6 +121,7 @@ class SpotifyApiProtocol(Protocol):
     def set_shuffle(self, enabled: bool, device_id: str | None = None) -> None: ...
     def set_volume(self, percent: int, device_id: str | None = None) -> None: ...
     def transfer_playback(self, device_id: str, play: bool = False) -> None: ...
+    def add_to_queue(self, uri: str, device_id: str | None = None) -> None: ...
 
     def library_contains(self, uris: list[str]) -> list[bool]: ...
     def library_save(self, uris: list[str]) -> None: ...
@@ -124,6 +130,9 @@ class SpotifyApiProtocol(Protocol):
     def get_saved_tracks(self, limit: int = MAX_PAGE_SIZE, offset: int = 0) -> dict: ...
     def get_playlists(self, limit: int = MAX_PAGE_SIZE, offset: int = 0) -> dict: ...
     def add_to_playlist(self, playlist_id: str, uris: list[str]) -> None: ...
+    def get_playlist_items(self, playlist_id: str, limit: int = MAX_PAGE_SIZE, offset: int = 0) -> dict: ...
+    def get_album_tracks(self, album_id: str, limit: int = MAX_PAGE_SIZE, offset: int = 0) -> dict: ...
+    def get_queue(self) -> dict: ...
 
     def get_context(self, uri: str) -> dict | None: ...
 
@@ -296,6 +305,13 @@ class SpotifyApiClient:
     def transfer_playback(self, device_id: str, play: bool = False) -> None:
         self._request("PUT", Endpoints.PLAYER, json_body={"device_ids": [device_id], "play": bool(play)})
 
+    def add_to_queue(self, uri: str, device_id: str | None = None) -> None:
+        # `uri` goes in the query string; this route reads no body.
+        params = {"uri": uri}
+        if device_id:
+            params["device_id"] = device_id
+        self._request("POST", Endpoints.PLAYER_QUEUE, params=params)
+
     # -- library ----------------------------------------------------------
 
     def library_contains(self, uris: list[str]) -> list[bool]:
@@ -340,6 +356,24 @@ class SpotifyApiClient:
 
     def add_to_playlist(self, playlist_id: str, uris: list[str]) -> None:
         self._request("POST", Endpoints.playlist_items(playlist_id), json_body={"uris": list(uris)})
+
+    def get_playlist_items(self, playlist_id: str, limit: int = MAX_PAGE_SIZE, offset: int = 0) -> dict:
+        return self._request(
+            "GET",
+            Endpoints.playlist_items(playlist_id),
+            params={"limit": limit, "offset": offset},
+        ) or {}
+
+    def get_album_tracks(self, album_id: str, limit: int = MAX_PAGE_SIZE, offset: int = 0) -> dict:
+        return self._request(
+            "GET",
+            Endpoints.album_tracks(album_id),
+            params={"limit": limit, "offset": offset},
+        ) or {}
+
+    def get_queue(self) -> dict:
+        """What is playing and what Spotify intends to play after it."""
+        return self._request("GET", Endpoints.PLAYER_QUEUE) or {}
 
     # -- context ----------------------------------------------------------
 

@@ -70,7 +70,7 @@ def is_blank(image: Image.Image) -> bool:
 def test_every_required_icon_exists():
     required = {
         "setup", "play", "pause", "previous", "next", "seek_backward", "seek_forward",
-        "shuffle", "repeat_context", "repeat_track", "mode_stack",
+        "shuffle", "smart_shuffle", "repeat_context", "repeat_track", "mode_stack",
         "library_add", "library_saved", "explicit",
         "volume_up", "volume_down", "volume", "muted", "volume_stack",
         "song_stack", "clipboard", "context", "device_transfer", "user",
@@ -149,6 +149,21 @@ def test_mode_stack_shows_all_three_modes():
     off = render_mode_stack_key(KEY, shuffle=False, repeat_mode="off")
     assert unknown.tobytes() != off.tobytes()
     assert known.tobytes() != off.tobytes()
+
+
+def test_mode_stack_tells_smart_shuffle_apart_from_plain_shuffle():
+    plain = render_mode_stack_key(KEY, shuffle=True, repeat_mode="off")
+    smart = render_mode_stack_key(KEY, shuffle=True, repeat_mode="off", smart_shuffle=True)
+    off = render_mode_stack_key(KEY, shuffle=False, repeat_mode="off", smart_shuffle=False)
+
+    assert smart.tobytes() != plain.tobytes()
+    assert smart.tobytes() != off.tobytes()
+
+
+def test_smart_shuffle_glyph_is_not_the_shuffle_glyph():
+    assert render_icon("smart_shuffle", 96, theme.SPOTIFY_GREEN).tobytes() != render_icon(
+        "shuffle", 96, theme.SPOTIFY_GREEN
+    ).tobytes()
 
 
 def test_renderers_fit_a_small_key_too():
